@@ -27,12 +27,16 @@ This repository currently provides a **UI preview** that mirrors the major eleme
 
 > **Note:** All controls are non-interactive placeholders for now. They exist to verify the layout, naming, and docking structure before implementing real behaviour.
 
+## Crates
+
+- `rustnotepad_core`: foundational document model with UTF-8 file open/save, line-ending detection, and BOM preservation (Milestone 1 scope).
+
 ## Build script
 
 To produce a release binary named `rustnotepad` under `bin/`, execute:
 
 ```bash
-./scripts/build_rustnotepad.sh
+./scripts/dev/build_rustnotepad.sh
 ```
 
 The script ensures `cargo` is available, builds the `rustnotepad_gui` crate in release mode, and copies the resulting executable to `bin/rustnotepad`.

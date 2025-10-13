@@ -2210,6 +2210,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustnotepad_core"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "rustnotepad_gui"
 version = "0.1.0"
 dependencies = [

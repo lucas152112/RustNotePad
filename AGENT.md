@@ -2,6 +2,7 @@
 
 > 目標：以 Rust 重構「Notepad++」之**全部功能**（以 Notepad++ v8.8.6 為基準），並提供 Linux / Windows / macOS 三平臺版本。  
 > 本文件供 **CLI agent** 直接執行與追蹤（任務拆解、檢查清單、測試指令、一鍵腳本）。
+> English edition: `docs/AGENT_EN.md`
 
 ---
 
@@ -57,6 +58,7 @@ rustnotepad/
 
 ## 3. 功能對齊清單（Feature Parity Checklist）
 > 每項皆需：**設計文檔**、**單元/整合測試**、**E2E 測試腳本**、**相容性備註**。
+> 詳細追蹤與產出模板請參考 `docs/feature_parity/`。
 
 ### 3.1 檔案 / 編碼 / 行尾
 - 開啟/新建/另存/還原未儲存
