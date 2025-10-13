@@ -1,0 +1,13 @@
+[workspace]
+members = ["rustnotepad_gui"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["RustNotePad contributors"]
+
+[workspace.dependencies]
+eframe = { version = "0.25", features = ["default_fonts", "glow"] }
+egui = "0.25"
+once_cell = "1.19"

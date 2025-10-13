@@ -1,0 +1,13 @@
+[package]
+name = "rustnotepad_gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+once_cell = { workspace = true }
+
+[[bin]]
+name = "rustnotepad"
+path = "src/main.rs"

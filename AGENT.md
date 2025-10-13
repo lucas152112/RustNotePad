@@ -24,7 +24,7 @@
 
 ## 2. 架構與模組
 ```
-padrs/
+rustnotepad/
   crates/
     core/            # Rope 緩衝、多游標、undo/redo、剪貼板、EOL/編碼
     highlight/       # tree-sitter / 主題 / 折疊規則
@@ -63,7 +63,7 @@ padrs/
 - 編碼偵測/轉換（UTF‑8/UTF‑16/各種 ANSI/東亞編碼）；BOM 處理
 - 行尾 LF/CRLF/CR 自動偵測與切換
 - 最近文件、檔案關聯、檔案監控（檔案變更提示/自動重新載入）
-- **CLI 等價**：批次轉檔 `padrs-cli convert --from gbk --to utf8`
+- **CLI 等價**：批次轉檔 `rustnotepad-cli convert --from gbk --to utf8`
 
 ### 3.2 編輯
 - 多游標/矩形（列）選取/列編輯模式
@@ -207,7 +207,7 @@ Host API:
 ```bash
 # 1) 初始化專案骨架
 cargo install create-tauri-app --locked
-create-tauri-app padrs --template vanilla
+create-tauri-app rustnotepad --template vanilla
 # 2) 加入 workspace 與 crates（以模板腳本產生）
 ./scripts/dev/scaffold.sh
 # 3) 啟動 GUI
