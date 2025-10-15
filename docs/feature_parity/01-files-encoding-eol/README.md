@@ -2,7 +2,7 @@
 
 ## 範疇 / Scope
 - 開啟、建立、儲存、另存、還原未儲存文件。 / Open, create, save, save-as, and restore unsaved documents.
-- 編碼偵測與轉換（UTF-8/UTF-16/多位元舊編碼）含 BOM 處理。 / Encoding detection and conversion (UTF-8/UTF-16/multi-byte legacy encodings) with BOM handling.
+- 編碼偵測與轉換（UTF-8/UTF-16/Windows-1252/Shift-JIS/GBK/Big5 等）含 BOM 處理。 / Encoding detection and conversion (UTF-8/UTF-16/Windows-1252/Shift-JIS/GBK/Big5, etc.) with BOM handling.
 - 行尾偵測與 LF / CRLF / CR 切換。 / Line ending detection and switching between LF/CRLF/CR.
 - 最近文件清單、檔案關聯、外部檔案變動監控與重新載入提示。 / Recent file list, file associations, and external monitoring with reload prompts.
 - CLI 同步：透過 `rustnotepad-cli convert --from <enc> --to <enc>` 批次轉換。 / CLI parity: batch conversion via `rustnotepad-cli convert --from <enc> --to <enc>`.
@@ -10,7 +10,7 @@
 ## CLI 輔助工具 / CLI Helpers
 - `rustnotepad-cli convert <files...> --to <encoding> [--line-ending <lf|crlf|cr>] [--bom <true|false>]` — 單指令完成編碼與行尾轉換。 / Single command to transform encoding and line endings.
 - 支援 `--output <path>` 單檔輸出與 `--output-dir <dir>` 批次輸出。 / Supports single-file `--output <path>` and batch `--output-dir <dir>` workflows.
-- 可選 `--from <encoding>` 以避免誤判錯誤轉換。 / Optional `--from <encoding>` guard prevents accidental conversions when detection disagrees.
+- 可選 `--from <encoding>` 以避免誤判錯誤轉換（支援 `utf8`, `utf16-le`, `utf16-be`, `windows-1252`, `shift-jis`, `gbk`, `big5` 等）。 / Optional `--from <encoding>` guard prevents accidental conversions (supports `utf8`, `utf16-le`, `utf16-be`, `windows-1252`, `shift-jis`, `gbk`, `big5`, etc.).
 
 ## 狀態核對表 / Status Checklist
 - [x] 已撰寫並審閱 `design.md`（第一階段聚焦 UTF-8/UTF-16）。 / `design.md` drafted and reviewed (Milestone 1 focuses on UTF-8/UTF-16).

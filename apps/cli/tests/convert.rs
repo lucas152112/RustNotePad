@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fs;
 
 use assert_cmd::Command;
+use encoding_rs::GBK;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
@@ -60,7 +61,33 @@ fn convert_fails_when_from_encoding_mismatches_detection() -> Result<(), Box<dyn
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("detected as Utf8"));
+        .stderr(predicate::str::contains("detected as utf-8"));
+
+    Ok(())
+}
+
+#[test]
+fn convert_gbk_to_utf8_in_place() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let input = dir.path().join("cn.txt");
+    let (encoded, _, _) = GBK.encode("中文測試");
+    fs::write(&input, encoded.as_ref())?;
+
+    Command::cargo_bin("rustnotepad-cli")?
+        .args([
+            "convert",
+            input.to_str().unwrap(),
+            "--from",
+            "gbk",
+            "--to",
+            "utf8",
+            "--in-place",
+        ])
+        .assert()
+        .success();
+
+    let contents = fs::read_to_string(&input)?;
+    assert_eq!(contents, "中文測試");
 
     Ok(())
 }

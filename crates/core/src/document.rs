@@ -1,6 +1,10 @@
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+use chardetng::EncodingDetector;
+use encoding_rs::{Encoding as RsEncoding, BIG5, GBK, SHIFT_JIS, WINDOWS_1252};
 use thiserror::Error;
 
 /// 表示文件目前使用的行尾樣式。 / Represents the current line ending style for a document.
@@ -28,6 +32,47 @@ pub enum Encoding {
     Utf8,
     Utf16Le,
     Utf16Be,
+    Legacy(LegacyEncoding),
+}
+
+/// 指定支援的傳統多位元編碼。 / Enumerates supported legacy multi-byte encodings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyEncoding {
+    Windows1252,
+    ShiftJis,
+    Gbk,
+    Big5,
+}
+
+impl LegacyEncoding {
+    pub fn name(self) -> &'static str {
+        match self {
+            LegacyEncoding::Windows1252 => "windows-1252",
+            LegacyEncoding::ShiftJis => "shift-jis",
+            LegacyEncoding::Gbk => "gbk",
+            LegacyEncoding::Big5 => "big5",
+        }
+    }
+
+    fn to_rs(self) -> &'static RsEncoding {
+        match self {
+            LegacyEncoding::Windows1252 => WINDOWS_1252,
+            LegacyEncoding::ShiftJis => SHIFT_JIS,
+            LegacyEncoding::Gbk => GBK,
+            LegacyEncoding::Big5 => BIG5,
+        }
+    }
+}
+
+impl Encoding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "utf-8",
+            Encoding::Utf16Le => "utf-16le",
+            Encoding::Utf16Be => "utf-16be",
+            Encoding::Legacy(legacy) => legacy.name(),
+        }
+    }
 }
 
 /// 文件載入或儲存時可能發生的錯誤。 / Errors that can occur while loading or saving a document.
@@ -37,9 +82,11 @@ pub enum DocumentError {
     Io(#[from] io::Error),
     #[error("file encoding is not supported or data is invalid")]
     InvalidEncoding,
+    #[error("text cannot be represented in target encoding {0}")]
+    Unrepresentable(&'static str),
 }
 
-/// 代表以 Unicode 文字檔為後盾的文件記憶體模型。 / In-memory representation of a text document backed by a Unicode text file.
+/// 代表以 Unicode 或特定舊式文字編碼為後盾的文件記憶體模型。 / In-memory representation of a text document backed by a Unicode or selected legacy-encoded text file.
 #[derive(Debug, Clone)]
 pub struct Document {
     path: Option<PathBuf>,
@@ -97,7 +144,7 @@ impl Document {
     /// 將文件另存為新路徑並更新相關中繼資料。 / Saves the document to a new path, updating the associated metadata.
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), DocumentError> {
         let path_ref = path.as_ref();
-        let encoded = self.serialise_contents();
+        let encoded = self.serialise_contents()?;
 
         // 先寫入暫存檔再重新命名，避免出現部分寫入的情況。 / Use a temporary file plus rename to guard against partial writes.
         let tmp_path = path_ref.with_extension("tmp_rustnotepad");
@@ -147,6 +194,9 @@ impl Document {
     pub fn set_encoding(&mut self, encoding: Encoding) {
         if self.encoding != encoding {
             self.encoding = encoding;
+            if matches!(self.encoding, Encoding::Legacy(_)) {
+                self.has_bom = false;
+            }
             self.is_dirty = true;
         }
     }
@@ -169,14 +219,24 @@ impl Document {
         self.is_dirty
     }
 
+    /// 將文件標記為已修改。 / Marks the document as having unsaved changes.
+    pub fn mark_dirty(&mut self) {
+        self.is_dirty = true;
+    }
+
     /// 取得文件所屬的檔案路徑（若存在）。 / Retrieves the associated path if the document is linked to one.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    fn serialise_contents(&self) -> Vec<u8> {
+    /// 更新檔案路徑中繼資料（不影響 dirty 狀態）。 / Updates the associated file path metadata without affecting dirty state.
+    pub fn set_path(&mut self, path: Option<PathBuf>) {
+        self.path = path;
+    }
+
+    pub(crate) fn serialise_contents(&self) -> Result<Vec<u8>, DocumentError> {
         let text = self.contents.replace('\n', self.line_ending.as_str());
-        match self.encoding {
+        let bytes = match self.encoding {
             Encoding::Utf8 => {
                 if self.has_bom {
                     // 在輸出資料前加上 UTF-8 BOM。 / Prepend UTF-8 BOM bytes to the encoded payload.
@@ -190,7 +250,9 @@ impl Document {
             }
             Encoding::Utf16Le => encode_utf16(&text, self.has_bom, false),
             Encoding::Utf16Be => encode_utf16(&text, self.has_bom, true),
-        }
+            Encoding::Legacy(legacy) => encode_legacy(&text, legacy)?,
+        };
+        Ok(bytes)
     }
 }
 
@@ -247,12 +309,24 @@ fn decode_bytes(bytes: Vec<u8>) -> Result<DecodedText, DocumentError> {
         });
     }
 
-    let text = String::from_utf8(bytes).map_err(|_| DocumentError::InvalidEncoding)?;
-    Ok(DecodedText {
-        text,
-        encoding: Encoding::Utf8,
-        has_bom: false,
-    })
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        return Ok(DecodedText {
+            text: text.to_owned(),
+            encoding: Encoding::Utf8,
+            has_bom: false,
+        });
+    }
+
+    if let Some(legacy) = detect_legacy_encoding(&bytes) {
+        let text = decode_legacy(&bytes, legacy)?;
+        return Ok(DecodedText {
+            text,
+            encoding: Encoding::Legacy(legacy),
+            has_bom: false,
+        });
+    }
+
+    Err(DocumentError::InvalidEncoding)
 }
 
 fn decode_utf16(bytes: &[u8], big_endian: bool) -> Result<String, DocumentError> {
@@ -273,8 +347,7 @@ fn decode_utf16(bytes: &[u8], big_endian: bool) -> Result<String, DocumentError>
 }
 
 fn encode_utf16(text: &str, include_bom: bool, big_endian: bool) -> Vec<u8> {
-    let mut buffer =
-        Vec::with_capacity(text.len() * 2 + if include_bom { 2 } else { 0 });
+    let mut buffer = Vec::with_capacity(text.len() * 2 + if include_bom { 2 } else { 0 });
     if include_bom {
         buffer.extend_from_slice(if big_endian { b"\xFE\xFF" } else { b"\xFF\xFE" });
     }
@@ -288,6 +361,54 @@ fn encode_utf16(text: &str, include_bom: bool, big_endian: bool) -> Vec<u8> {
         buffer.extend_from_slice(&bytes);
     }
     buffer
+}
+
+fn encode_legacy(text: &str, legacy: LegacyEncoding) -> Result<Vec<u8>, DocumentError> {
+    let encoder = legacy.to_rs();
+    let (cow, _, had_errors) = encoder.encode(text);
+    if had_errors {
+        return Err(DocumentError::Unrepresentable(legacy.name()));
+    }
+    Ok(match cow {
+        Cow::Borrowed(slice) => slice.to_vec(),
+        Cow::Owned(vec) => vec,
+    })
+}
+
+fn decode_legacy(bytes: &[u8], legacy: LegacyEncoding) -> Result<String, DocumentError> {
+    let decoder = legacy.to_rs();
+    let (cow, had_errors) = decoder.decode_without_bom_handling(bytes);
+    if had_errors {
+        return Err(DocumentError::InvalidEncoding);
+    }
+    Ok(match cow {
+        Cow::Borrowed(slice) => slice.to_owned(),
+        Cow::Owned(string) => string,
+    })
+}
+
+fn detect_legacy_encoding(bytes: &[u8]) -> Option<LegacyEncoding> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut detector = EncodingDetector::new();
+    detector.feed(bytes, true);
+    let guess = detector.guess(None, true);
+    map_rs_encoding(guess)
+}
+
+fn map_rs_encoding(encoding: &'static RsEncoding) -> Option<LegacyEncoding> {
+    if encoding == WINDOWS_1252 {
+        Some(LegacyEncoding::Windows1252)
+    } else if encoding == SHIFT_JIS {
+        Some(LegacyEncoding::ShiftJis)
+    } else if encoding == GBK {
+        Some(LegacyEncoding::Gbk)
+    } else if encoding == BIG5 {
+        Some(LegacyEncoding::Big5)
+    } else {
+        None
+    }
 }
 
 fn looks_like_utf16_le(bytes: &[u8]) -> bool {
@@ -361,6 +482,7 @@ fn normalize_newlines(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use encoding_rs::{GBK, SHIFT_JIS};
     use std::fs;
 
     fn write_bytes(path: &Path, bytes: &[u8]) {
@@ -413,9 +535,7 @@ mod tests {
     fn open_handles_utf16_be_bom() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("utf16-be.txt");
-        let payload = [
-            0xFE, 0xFF, 0x00, b'h', 0x00, b'i', 0x00, b'!', 0x00, b'\n',
-        ];
+        let payload = [0xFE, 0xFF, 0x00, b'h', 0x00, b'i', 0x00, b'!', 0x00, b'\n'];
         write_bytes(&file_path, &payload);
 
         let doc = Document::open(&file_path).unwrap();
@@ -426,17 +546,45 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_non_utf8() {
+    fn open_detects_gbk_legacy() {
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("invalid.txt");
-        // 無效的 UTF-8 序列，不符合支援的編碼。 / Invalid UTF-8 sequence that does not map to supported encodings.
-        write_bytes(&file_path, &[0xC3, 0x28]);
+        let file_path = dir.path().join("gbk.txt");
+        let (encoded, _, _) = GBK.encode("中文測試");
+        write_bytes(&file_path, encoded.as_ref());
+
+        let doc = Document::open(&file_path).unwrap();
+        assert_eq!(doc.contents(), "中文測試");
+        assert!(matches!(
+            doc.encoding(),
+            Encoding::Legacy(LegacyEncoding::Gbk)
+        ));
+        assert!(!doc.has_bom());
+    }
+
+    #[test]
+    fn open_detects_shift_jis_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("shiftjis.txt");
+        let (encoded, _, _) = SHIFT_JIS.encode("テスト");
+        write_bytes(&file_path, encoded.as_ref());
+
+        let doc = Document::open(&file_path).unwrap();
+        assert_eq!(doc.contents(), "テスト");
+        assert!(matches!(
+            doc.encoding(),
+            Encoding::Legacy(LegacyEncoding::ShiftJis)
+        ));
+    }
+
+    #[test]
+    fn open_rejects_invalid_shift_jis_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("invalid-sjis.txt");
+        // SHIFT_JIS 中 0x82 需搭配第二個位元組，搭配 0xFF 會造成解碼錯誤。 / SHIFT_JIS lead byte 0x82 paired with 0xFF produces an invalid sequence.
+        write_bytes(&file_path, &[0x82, 0xFF]);
 
         let err = Document::open(&file_path).unwrap_err();
-        match err {
-            DocumentError::InvalidEncoding => {}
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(matches!(err, DocumentError::InvalidEncoding));
     }
 
     #[test]
@@ -494,6 +642,36 @@ mod tests {
         let units: Vec<u16> = bytes_to_u16_be(&raw);
         let text = String::from_utf16(&units).unwrap();
         assert_eq!(text, "AB");
+    }
+
+    #[test]
+    fn save_serialises_gbk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("gbk-save.txt");
+
+        let mut doc = Document::new();
+        doc.set_contents("中文");
+        doc.set_encoding(Encoding::Legacy(LegacyEncoding::Gbk));
+        doc.save_as(&file_path).unwrap();
+
+        let bytes = fs::read(&file_path).unwrap();
+        let (decoded, _, _) = GBK.decode(&bytes);
+        assert_eq!(decoded.as_ref(), "中文");
+    }
+
+    #[test]
+    fn save_rejects_unrepresentable_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("latin1.txt");
+
+        let mut doc = Document::new();
+        doc.set_contents("漢");
+        doc.set_encoding(Encoding::Legacy(LegacyEncoding::Windows1252));
+        let err = doc.save_as(&file_path).unwrap_err();
+        assert!(matches!(
+            err,
+            DocumentError::Unrepresentable("windows-1252")
+        ));
     }
 
     #[test]

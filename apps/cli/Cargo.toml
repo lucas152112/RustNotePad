@@ -16,3 +16,4 @@ rustnotepad_core = { path = "../../crates/core" }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.10"
+encoding_rs = { workspace = true }

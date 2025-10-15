@@ -165,7 +165,12 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
         ),
         MenuSection::new(
             "Plugins",
-            &["Plugins Admin...", "Plugin Manager", "Plugin Console", "WASM Extensions ▸"],
+            &[
+                "Plugins Admin...",
+                "Plugin Manager",
+                "Plugin Console",
+                "WASM Extensions ▸",
+            ],
         ),
         MenuSection::new(
             "Window",
@@ -177,25 +182,16 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
                 "Windows...",
             ],
         ),
-        MenuSection::new("?", &["About RustNotePad", "Documentation", "Check for Updates..."]),
+        MenuSection::new(
+            "?",
+            &["About RustNotePad", "Documentation", "Check for Updates..."],
+        ),
     ]
 });
 
 static TOOLBAR_PRIMARY: &[&str] = &[
-    "New",
-    "Open",
-    "Save",
-    "Save All",
-    "Print",
-    "Undo",
-    "Redo",
-    "Cut",
-    "Copy",
-    "Paste",
-    "Find",
-    "Replace",
-    "Macro",
-    "Run",
+    "New", "Open", "Save", "Save All", "Print", "Undo", "Redo", "Cut", "Copy", "Paste", "Find",
+    "Replace", "Macro", "Run",
 ];
 
 static TOOLBAR_SECONDARY: &[&str] = &[
@@ -219,56 +215,54 @@ static OPEN_TABS: Lazy<Vec<EditorTab>> = Lazy::new(|| {
     ]
 });
 
-static PROJECT_TREE: &[ProjectNode] = &[
-    ProjectNode {
-        name: "rustnotepad",
-        children: &[
-            ProjectNode::leaf("Cargo.toml"),
-            ProjectNode {
-                name: "apps",
-                children: &[
-                    ProjectNode {
-                        name: "gui-tauri",
-                        children: &[ProjectNode::leaf("main.rs"), ProjectNode::leaf("lib.rs")],
-                    },
-                    ProjectNode {
-                        name: "cli",
-                        children: &[ProjectNode::leaf("main.rs")],
-                    },
-                ],
-            },
-            ProjectNode {
-                name: "crates",
-                children: &[
-                    ProjectNode {
-                        name: "core",
-                        children: &[
-                            ProjectNode::leaf("lib.rs"),
-                            ProjectNode::leaf("buffer.rs"),
-                            ProjectNode::leaf("undo.rs"),
-                        ],
-                    },
-                    ProjectNode {
-                        name: "search",
-                        children: &[ProjectNode::leaf("lib.rs"), ProjectNode::leaf("engine.rs")],
-                    },
-                    ProjectNode {
-                        name: "highlight",
-                        children: &[ProjectNode::leaf("lib.rs"), ProjectNode::leaf("themes.rs")],
-                    },
-                ],
-            },
-            ProjectNode {
-                name: "assets",
-                children: &[
-                    ProjectNode::leaf("Default (Dark).theme"),
-                    ProjectNode::leaf("Light.theme"),
-                    ProjectNode::leaf("langs/en-US.toml"),
-                ],
-            },
-        ],
-    },
-];
+static PROJECT_TREE: &[ProjectNode] = &[ProjectNode {
+    name: "rustnotepad",
+    children: &[
+        ProjectNode::leaf("Cargo.toml"),
+        ProjectNode {
+            name: "apps",
+            children: &[
+                ProjectNode {
+                    name: "gui-tauri",
+                    children: &[ProjectNode::leaf("main.rs"), ProjectNode::leaf("lib.rs")],
+                },
+                ProjectNode {
+                    name: "cli",
+                    children: &[ProjectNode::leaf("main.rs")],
+                },
+            ],
+        },
+        ProjectNode {
+            name: "crates",
+            children: &[
+                ProjectNode {
+                    name: "core",
+                    children: &[
+                        ProjectNode::leaf("lib.rs"),
+                        ProjectNode::leaf("buffer.rs"),
+                        ProjectNode::leaf("undo.rs"),
+                    ],
+                },
+                ProjectNode {
+                    name: "search",
+                    children: &[ProjectNode::leaf("lib.rs"), ProjectNode::leaf("engine.rs")],
+                },
+                ProjectNode {
+                    name: "highlight",
+                    children: &[ProjectNode::leaf("lib.rs"), ProjectNode::leaf("themes.rs")],
+                },
+            ],
+        },
+        ProjectNode {
+            name: "assets",
+            children: &[
+                ProjectNode::leaf("Default (Dark).theme"),
+                ProjectNode::leaf("Light.theme"),
+                ProjectNode::leaf("langs/en-US.toml"),
+            ],
+        },
+    ],
+}];
 
 static FUNCTION_LIST: &[&str] = &[
     "fn main()",
@@ -289,7 +283,12 @@ static DOC_SWITCHER_ITEMS: &[&str] = &[
     "session/workspace.json",
 ];
 
-static BOTTOM_TABS: &[&str] = &["Find Results", "Console Output", "Notifications", "LSP Diagnostics"];
+static BOTTOM_TABS: &[&str] = &[
+    "Find Results",
+    "Console Output",
+    "Notifications",
+    "LSP Diagnostics",
+];
 
 static SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview
 fn main() {
@@ -382,27 +381,33 @@ impl RustNotePadApp {
             .show(ctx, |ui| {
                 ui.heading("Project Panel");
                 ui.separator();
-                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    for node in PROJECT_TREE.iter() {
-                        self.render_project_node(ui, node, 0);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        for node in PROJECT_TREE.iter() {
+                            self.render_project_node(ui, node, 0);
+                        }
+                    });
                 ui.separator();
                 ui.heading("Function List");
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                    for item in FUNCTION_LIST.iter() {
-                        ui.label(*item);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for item in FUNCTION_LIST.iter() {
+                            ui.label(*item);
+                        }
+                    });
                 ui.separator();
                 ui.heading("Doc Switcher");
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                    for doc in DOC_SWITCHER_ITEMS.iter() {
-                        ui.label(*doc);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .show(ui, |ui| {
+                        for doc in DOC_SWITCHER_ITEMS.iter() {
+                            ui.label(*doc);
+                        }
+                    });
             });
     }
 
@@ -440,10 +445,7 @@ impl RustNotePadApp {
                 ui.horizontal(|ui| {
                     for (index, title) in BOTTOM_TABS.iter().enumerate() {
                         let selected = self.bottom_tab_index == index;
-                        if ui
-                            .selectable_label(selected, *title)
-                            .clicked()
-                        {
+                        if ui.selectable_label(selected, *title).clicked() {
                             self.bottom_tab_index = index;
                         }
                     }

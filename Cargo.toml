@@ -1,5 +1,5 @@
 [workspace]
-members = ["rustnotepad_gui", "crates/core", "apps/cli"]
+members = ["rustnotepad_gui", "crates/core", "crates/settings", "apps/cli"]
 resolver = "2"
 
 [workspace.package]
@@ -12,3 +12,6 @@ eframe = { version = "0.25", features = ["default_fonts", "glow"] }
 egui = "0.25"
 once_cell = "1.19"
 thiserror = "1.0"
+encoding_rs = "0.8"
+chardetng = "0.1"
+base64 = "0.21"

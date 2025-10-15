@@ -6,11 +6,14 @@
 - 緩衝序列化與反序列化（`document::tests::save_preserves_line_endings_and_bom` 已涵蓋）。 / Buffer serialization/deserialization (covered by `document::tests::save_preserves_line_endings_and_bom`).
 - 編碼偵測輔助函式（`open_detects_line_endings_and_normalises_content` 已涵蓋）。 / Encoding detection helpers (covered by `open_detects_line_endings_and_normalises_content`).
 - 行尾轉換工具函式。 / Line-ending conversion utilities.
+- 遺留編碼（Windows-1252/Shift-JIS/GBK/Big5）偵測與回存測試。 / Legacy encoding detection & round-trips for Windows-1252/Shift-JIS/GBK/Big5.
+- 快照保存與還原流程（`recovery::tests`）。 / Snapshot saving & restoration (`recovery::tests`).
+- 檔案監視事件冒煙測試（`file_monitor::tests`）。 / File monitor smoke tests (`file_monitor::tests`).
 
 ## 整合測試 / Integration Tests
 - 不同編碼的開啟 / 儲存往返檢驗。 / File open/save round-trips across encodings.
 - 外部修改後的自動重新載入。 / Auto-reload when files change externally.
-- CLI 轉檔成功與失敗案例（`apps/cli/tests/convert.rs` 已涵蓋）。 / CLI conversion success/failure cases (covered by `apps/cli/tests/convert.rs`).
+- CLI 轉檔成功與失敗案例（`apps/cli/tests/convert.rs` 已涵蓋，包括 GBK → UTF-8）。 / CLI conversion success/failure cases (covered by `apps/cli/tests/convert.rs`, including GBK → UTF-8).
 
 ## 端對端情境 / E2E Scenarios
 - 500MB 以上大檔案開啟與儲存須在 2 秒內完成（SSD）。 / Large file (>500MB) open/save under 2 seconds (SSD assumption).

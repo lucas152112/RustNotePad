@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use rustnotepad_core::{Document, Encoding, LineEnding};
+use rustnotepad_core::{Document, Encoding, LegacyEncoding, LineEnding};
 
 #[derive(Parser)]
 #[command(
@@ -66,6 +66,14 @@ enum EncodingChoice {
     Utf16Le,
     #[value(name = "utf16-be", aliases = ["utf16be", "utf16_be"])]
     Utf16Be,
+    #[value(name = "windows-1252", aliases = ["cp1252", "windows1252", "latin1"])]
+    Windows1252,
+    #[value(name = "shift-jis", aliases = ["shiftjis", "sjis"])]
+    ShiftJis,
+    #[value(name = "gbk", aliases = ["gb2312"])]
+    Gbk,
+    #[value(name = "big5")]
+    Big5,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -84,6 +92,10 @@ impl From<EncodingChoice> for Encoding {
             EncodingChoice::Utf8 => Encoding::Utf8,
             EncodingChoice::Utf16Le => Encoding::Utf16Le,
             EncodingChoice::Utf16Be => Encoding::Utf16Be,
+            EncodingChoice::Windows1252 => Encoding::Legacy(LegacyEncoding::Windows1252),
+            EncodingChoice::ShiftJis => Encoding::Legacy(LegacyEncoding::ShiftJis),
+            EncodingChoice::Gbk => Encoding::Legacy(LegacyEncoding::Gbk),
+            EncodingChoice::Big5 => Encoding::Legacy(LegacyEncoding::Big5),
         }
     }
 }
@@ -156,17 +168,17 @@ fn convert_single(
     single_output: Option<&PathBuf>,
     output_dir: Option<&PathBuf>,
 ) -> Result<()> {
-    let mut document = Document::open(input)
-        .with_context(|| format!("failed to open {}", input.display()))?;
+    let mut document =
+        Document::open(input).with_context(|| format!("failed to open {}", input.display()))?;
 
     if let Some(expected) = from {
         let expected_encoding: Encoding = expected.into();
         if document.encoding() != expected_encoding {
             bail!(
-                "input {} is detected as {:?} but --from {:?} was supplied",
+                "input {} is detected as {} but --from {} was supplied",
                 input.display(),
-                document.encoding(),
-                expected_encoding
+                document.encoding().name(),
+                expected_encoding.name()
             );
         }
     }
