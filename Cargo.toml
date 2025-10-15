@@ -1,5 +1,5 @@
 [workspace]
-members = ["rustnotepad_gui", "crates/core"]
+members = ["rustnotepad_gui", "crates/core", "apps/cli"]
 resolver = "2"
 
 [workspace.package]
