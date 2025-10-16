@@ -24,6 +24,14 @@
 - `Document::save_as` 已採暫存檔 + rename；後續會將編輯 buffer 與 Document 類型串接，確保儲存前同步內容。 / The existing atomic save flow (`Document::save_as`) will integrate with the editing buffer so in-memory changes flush safely before snapshotting.
 - 儲存失敗時保留快照並阻擋緩衝區清除 dirty flag。 / On save failure we will keep the buffer marked dirty and persist recovery snapshots.
 
+## 6. Implementation Status Snapshot (2024-Q2)
+- `editor.rs` 現已支援 forward delete、換行插入、批次取代與 caret 驗證。 / `editor.rs` now exposes forward delete, newline insertion, batch replacements, and stricter caret validation.
+- `line_ops.rs` 聚合行層級指令（縮排、去重、排序、大小寫轉換、修剪尾端空白）。 / `line_ops.rs` collects line-level commands (indent/outdent, dedupe, sort, case conversion, trailing-whitespace trim).
+- `column_ops.rs` 實作矩形選取/貼上並自動補齊不足欄位。 / `column_ops.rs` implements rectangular selection edits with automatic padding for ragged lines.
+- 書籤與折疊狀態分離為 `bookmarks.rs` 與 `folding.rs`，可供 GUI/Session 模組直接串接。 / Bookmark & folding state are encapsulated in `bookmarks.rs` and `folding.rs` for direct GUI/session integration.
+- `split_view.rs` 定義雙面板與多執行個體策略，提供 tabs clone/move/detach API。 / `split_view.rs` models dual-pane & multi-instance strategy with tab clone/move/detach APIs.
+- `document_map.rs` 提供 minimap/統計資料，供文件地圖、狀態列與性能監控使用。 / `document_map.rs` generates minimap slices and metrics for document map, status bar, and perf instrumentation.
+
 ## Decision log
 - 以 `apply_replacements` 統一所有編輯命令，避免重複處理 index 修正。 / Normalise all editing commands through `apply_replacements` to centralise index shifting logic.
 - 保持 `EditorBuffer` API 不依賴具體緩衝實作，為未來 rope/piece-table 替換預留空間。 / Keep the `EditorBuffer` API detached from the backing store to ease future rope/piece-table migration.

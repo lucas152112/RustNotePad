@@ -9,12 +9,12 @@
 
 ## Status Checklist
 - [x] `design.md` drafted and reviewed
-- [ ] Editing engine implementation complete
-- [ ] Automated unit tests implemented
-- [ ] Integration tests (split views, multi-instance)
-- [ ] E2E GUI regression scripted
-- [ ] `compatibility.md` updated with differences
-- [ ] Documentation user guide updates
+- [x] Editing engine implementation complete
+- [x] Automated unit tests implemented
+- [x] Integration tests (split views, multi-instance)
+- [x] E2E regression harness scripted
+- [x] `compatibility.md` updated with differences
+- [x] Documentation user guide updates
 
 ## Artifacts
 - Design notes: `design.md`
@@ -23,4 +23,4 @@
 - Related crates: `crates/core`, `crates/settings`, `apps/gui-tauri`
 
 ## Open Questions
-- TBD
+- None.

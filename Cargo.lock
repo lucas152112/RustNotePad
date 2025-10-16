@@ -2577,6 +2577,10 @@ dependencies = [
 [[package]]
 name = "rustnotepad_settings"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "tempfile",
+]
 
 [[package]]
 name = "rustversion"
