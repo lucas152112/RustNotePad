@@ -12,6 +12,7 @@
   - 提供 `open`、`save`、`save_as` 以及行尾/內容/BOM 操作。 / Provides `open`, `save`, `save_as`, and editing helpers (set contents, switch line endings, toggle BOM).
   - 透過掃描原始位元組找到第一個換行符推斷行尾。 / Detects line endings by scanning raw bytes for the first newline sentinel.
   - 流式轉換 CRLF/CR 為 LF，避免額外配置。 / Normalises CRLF/CR to LF using a streaming conversion to avoid extra allocations.
+  - 追蹤檔案長度與修改時間指紋，以偵測磁碟異動並支援 `reload`。 / Tracks file-length and mtime signatures to detect disk changes and expose a `reload` helper.
   - 利用 `chardetng` + `encoding_rs` 偵測並解碼 Windows-1252、Shift-JIS、GBK、Big5 等編碼。 / Leverages `chardetng` plus `encoding_rs` to detect and decode Windows-1252, Shift-JIS, GBK, Big5, and similar encodings.
 - `crates/core::recovery::RecoveryManager`
   - 將暫存快照與中繼資料儲存於指定資料夾，供未儲存文件崩潰後還原。 / Persists snapshots and metadata in a recovery directory for crash restoration of unsaved documents.
@@ -20,6 +21,7 @@
   - 基於 `notify` 建立跨平台檔案監視抽象（修改/刪除/重新命名）。 / Provides a cross-platform watcher atop `notify` that surfaces modify/remove/rename events.
 - `crates/settings::recent::RecentFiles` 與 `crates/settings::associations::FileAssociations`
   - 管理最近檔案歷史與副檔名關聯設定，供 GUI/CLI 設定層使用。 / Manage recent-file history and extension associations for consumption by GUI/CLI layers.
+  - `storage` 模組將兩者序列化為 base64 編碼的純文字格式，確保跨平臺保留特殊字元。 / The `storage` module serialises both structures into base64-backed text files so special characters survive across platforms.
 - 錯誤以 `DocumentError`（thiserror）呈現，便於傳遞。 / Error surface expressed via `DocumentError` using `thiserror` for ergonomic propagation.
 - 儲存時採 `tmp_rustnotepad` 檔案搭配 `fs::rename`，降低崩潰風險。 / Saving uses a sibling `tmp_rustnotepad` file followed by `fs::rename` to mitigate crash risk.
 

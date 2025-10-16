@@ -18,6 +18,19 @@ impl RecentFiles {
         }
     }
 
+    /// 依序列化資料還原最近檔案清單。 / Reconstructs the list from persisted entries.
+    pub fn with_entries(capacity: usize, entries: Vec<PathBuf>) -> Self {
+        let capacity = capacity.max(1);
+        let mut deque: VecDeque<PathBuf> = entries.into_iter().collect();
+        while deque.len() > capacity {
+            deque.pop_back();
+        }
+        Self {
+            capacity,
+            entries: deque,
+        }
+    }
+
     /// 取得最大容量。 / Returns the maximum number of tracked entries.
     pub fn capacity(&self) -> usize {
         self.capacity
@@ -73,6 +86,7 @@ impl RecentFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn add_promotes_and_limits_capacity() {
@@ -111,5 +125,14 @@ mod tests {
         assert_eq!(recent.len(), 1);
         recent.clear();
         assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn with_entries_restores_state() {
+        let paths = vec!["a", "b", "c"].into_iter().map(PathBuf::from).collect();
+        let recent = RecentFiles::with_entries(2, paths);
+        let collected: Vec<_> = recent.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(collected, vec!["a", "b"]);
+        assert_eq!(recent.capacity(), 2);
     }
 }

@@ -29,7 +29,8 @@ This repository currently provides a **UI preview** that mirrors the major eleme
 
 ## Crates
 
-- `rustnotepad_core`: foundational document model with UTF-8 file open/save, line-ending detection, and BOM preservation (Milestone 1 scope).
+- `rustnotepad_core`: foundational document model with encoding/BOM round-trips, disk-change detection & reload helpers, recovery snapshots, file monitoring, and the first multi-caret editing primitives (`EditorBuffer`).
+- `rustnotepad_settings`: recent file history & file-association management with cross-platform persistence helpers.
 
 ## Build script
 

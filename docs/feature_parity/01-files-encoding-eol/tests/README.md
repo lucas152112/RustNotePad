@@ -9,6 +9,8 @@
 - 遺留編碼（Windows-1252/Shift-JIS/GBK/Big5）偵測與回存測試。 / Legacy encoding detection & round-trips for Windows-1252/Shift-JIS/GBK/Big5.
 - 快照保存與還原流程（`recovery::tests`）。 / Snapshot saving & restoration (`recovery::tests`).
 - 檔案監視事件冒煙測試（`file_monitor::tests`）。 / File monitor smoke tests (`file_monitor::tests`).
+- 磁碟異動偵測與重新載入（`check_disk_state_reports_*`）。 / Disk change detection plus reload flow (`check_disk_state_reports_*`).
+- 最近檔案與副檔名關聯持久化（`settings::storage::tests`）。 / Recent-files and association persistence (`settings::storage::tests`).
 
 ## 整合測試 / Integration Tests
 - 不同編碼的開啟 / 儲存往返檢驗。 / File open/save round-trips across encodings.

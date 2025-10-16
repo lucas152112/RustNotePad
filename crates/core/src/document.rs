@@ -1,7 +1,8 @@
 use std::borrow::Cow;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs::{self, File, Metadata};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chardetng::EncodingDetector;
 use encoding_rs::{Encoding as RsEncoding, BIG5, GBK, SHIFT_JIS, WINDOWS_1252};
@@ -33,6 +34,14 @@ pub enum Encoding {
     Utf16Le,
     Utf16Be,
     Legacy(LegacyEncoding),
+}
+
+/// 反映磁碟上的檔案狀態，用以判定是否需要重新載入。 / Snapshot of the on-disk state for change detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskState {
+    Unchanged,
+    Modified,
+    Removed,
 }
 
 /// 指定支援的傳統多位元編碼。 / Enumerates supported legacy multi-byte encodings.
@@ -75,6 +84,22 @@ impl Encoding {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    len: u64,
+    modified_nanos: Option<u128>,
+}
+
+impl FileSignature {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        let modified_nanos = metadata.modified().ok().and_then(system_time_to_nanos);
+        Self {
+            len: metadata.len(),
+            modified_nanos,
+        }
+    }
+}
+
 /// 文件載入或儲存時可能發生的錯誤。 / Errors that can occur while loading or saving a document.
 #[derive(Error, Debug)]
 pub enum DocumentError {
@@ -95,6 +120,7 @@ pub struct Document {
     encoding: Encoding,
     has_bom: bool,
     is_dirty: bool,
+    on_disk_signature: Option<FileSignature>,
 }
 
 impl Document {
@@ -107,6 +133,7 @@ impl Document {
             encoding: Encoding::Utf8,
             has_bom: false,
             is_dirty: false,
+            on_disk_signature: None,
         }
     }
 
@@ -114,12 +141,14 @@ impl Document {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DocumentError> {
         let path_ref = path.as_ref();
         let mut file = File::open(path_ref)?;
+        let metadata = file.metadata()?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
         let decoded = decode_bytes(bytes)?;
         let line_ending = detect_line_ending(&decoded.text);
         let contents = normalize_newlines(&decoded.text);
+        let signature = FileSignature::from_metadata(&metadata);
 
         Ok(Self {
             path: Some(path_ref.to_path_buf()),
@@ -128,6 +157,7 @@ impl Document {
             encoding: decoded.encoding,
             has_bom: decoded.has_bom,
             is_dirty: false,
+            on_disk_signature: Some(signature),
         })
     }
 
@@ -155,8 +185,10 @@ impl Document {
         }
         fs::rename(&tmp_path, path_ref)?;
 
+        let metadata = fs::metadata(path_ref)?;
         self.path = Some(path_ref.to_path_buf());
         self.is_dirty = false;
+        self.on_disk_signature = Some(FileSignature::from_metadata(&metadata));
         Ok(())
     }
 
@@ -232,6 +264,43 @@ impl Document {
     /// 更新檔案路徑中繼資料（不影響 dirty 狀態）。 / Updates the associated file path metadata without affecting dirty state.
     pub fn set_path(&mut self, path: Option<PathBuf>) {
         self.path = path;
+        self.on_disk_signature = None;
+    }
+
+    /// 重新載入磁碟內容覆蓋記憶體，並重設 dirty 狀態。 / Reloads the document from disk, replacing the in-memory buffer.
+    pub fn reload(&mut self) -> Result<(), DocumentError> {
+        let Some(path) = self.path.clone() else {
+            return Err(DocumentError::Io(io::Error::new(
+                ErrorKind::Other,
+                "document has no associated path",
+            )));
+        };
+        let fresh = Document::open(&path)?;
+        *self = fresh;
+        Ok(())
+    }
+
+    /// 檢查磁碟上的檔案是否與快照不同。 / Checks whether the on-disk file differs from the stored snapshot.
+    pub fn check_disk_state(&self) -> Result<DiskState, DocumentError> {
+        let Some(path) = self.path.as_ref() else {
+            return Ok(DiskState::Unchanged);
+        };
+
+        match fs::metadata(path) {
+            Ok(metadata) => {
+                let signature = FileSignature::from_metadata(&metadata);
+                if self
+                    .on_disk_signature
+                    .map_or(true, |stored| stored != signature)
+                {
+                    Ok(DiskState::Modified)
+                } else {
+                    Ok(DiskState::Unchanged)
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(DiskState::Removed),
+            Err(err) => Err(DocumentError::Io(err)),
+        }
     }
 
     pub(crate) fn serialise_contents(&self) -> Result<Vec<u8>, DocumentError> {
@@ -439,6 +508,13 @@ fn looks_like_utf16(bytes: &[u8], big_endian: bool) -> bool {
     total > 0 && zero_count * 2 >= total
 }
 
+fn system_time_to_nanos(time: SystemTime) -> Option<u128> {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => Some(duration.as_nanos()),
+        Err(_) => None,
+    }
+}
+
 /// 掃描原始文字找到第一個換行記號以推斷行尾偏好。 / Scans the raw text for the first newline sentinel to infer the preferred line ending.
 fn detect_line_ending(text: &str) -> LineEnding {
     let bytes = text.as_bytes();
@@ -484,6 +560,8 @@ mod tests {
     use super::*;
     use encoding_rs::{GBK, SHIFT_JIS};
     use std::fs;
+    use std::thread;
+    use std::time::Duration;
 
     fn write_bytes(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).expect("failed to seed test file");
@@ -689,6 +767,34 @@ mod tests {
         let contents = fs::read_to_string(&file_path).unwrap();
         assert_eq!(contents, "new\ncontent\n");
         assert!(!doc.is_dirty());
+    }
+
+    #[test]
+    fn check_disk_state_reports_modification_and_reload_resets_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("monitor.txt");
+        write_bytes(&file_path, b"alpha");
+
+        let mut doc = Document::open(&file_path).unwrap();
+        thread::sleep(Duration::from_millis(10));
+        write_bytes(&file_path, b"alpha-beta");
+
+        assert_eq!(doc.check_disk_state().unwrap(), DiskState::Modified);
+        doc.reload().unwrap();
+        assert_eq!(doc.contents(), "alpha-beta");
+        assert_eq!(doc.check_disk_state().unwrap(), DiskState::Unchanged);
+    }
+
+    #[test]
+    fn check_disk_state_reports_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("removed.txt");
+        write_bytes(&file_path, b"temporary");
+
+        let doc = Document::open(&file_path).unwrap();
+        fs::remove_file(&file_path).unwrap();
+
+        assert_eq!(doc.check_disk_state().unwrap(), DiskState::Removed);
     }
 
     fn bytes_to_u16_be(bytes: &[u8]) -> Vec<u16> {

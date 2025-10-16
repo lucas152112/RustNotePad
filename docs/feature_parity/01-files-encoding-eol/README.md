@@ -18,7 +18,7 @@
 - [x] 自動化單元測試完成。 / Automated unit tests implemented.
 - [x] 整合 / CLI 測試完成。 / Integration / CLI tests implemented.
 - [ ] 尚未撰寫 E2E 回歸流程。 / E2E regression still pending.
-- [ ] `compatibility.md` 尚待補完行為差異。 / `compatibility.md` needs remaining behaviour diffs.
+- [x] `compatibility.md` 尚待補完行為差異。 / `compatibility.md` needs remaining behaviour diffs.
 - [ ] 使用者文件與指引尚待更新。 / Documentation & user guidance updates pending.
 
 ## 產出物 / Artifacts

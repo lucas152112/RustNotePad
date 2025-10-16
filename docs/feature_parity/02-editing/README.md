@@ -8,7 +8,7 @@
 - Safe save semantics (permissions, temp files, crash resilience)
 
 ## Status Checklist
-- [ ] `design.md` drafted and reviewed
+- [x] `design.md` drafted and reviewed
 - [ ] Editing engine implementation complete
 - [ ] Automated unit tests implemented
 - [ ] Integration tests (split views, multi-instance)
