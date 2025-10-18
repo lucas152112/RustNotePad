@@ -7,13 +7,13 @@
 - Layout persistence, split panes, docking behaviours
 
 ## Status Checklist
-- [ ] `design.md` drafted and reviewed
-- [ ] UI layout system implementation
-- [ ] Theme/appearance management implemented
-- [ ] Unit tests for layout serialization
+- [x] `design.md` drafted and reviewed
+- [x] UI layout system implementation
+- [x] Theme/appearance management implemented
+- [x] Unit tests for layout serialization
 - [ ] E2E UI regression coverage
-- [ ] `compatibility.md` updated with differences
-- [ ] Documentation / screenshots updated
+- [x] `compatibility.md` updated with differences
+- [x] Documentation / screenshots updated
 
 ## Artifacts
 - Design notes: `design.md`
@@ -22,4 +22,5 @@
 - Related crates: `apps/gui-tauri`, `crates/settings`, `assets/themes`
 
 ## Open Questions
-- TBD
+- How should interactive docking (drag/drop panes) be modelled once the Tauri shell is wired to real window handles?
+- Which additional palette entries are required for plugin panels and diff viewers?

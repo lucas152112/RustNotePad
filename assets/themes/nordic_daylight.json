@@ -1,0 +1,20 @@
+{
+  "name": "Nordic Daylight",
+  "description": "Soft light palette with blue accents",
+  "kind": "light",
+  "palette": {
+    "background": "#F3F4F6",
+    "panel": "#FFFFFF",
+    "accent": "#3B82F6",
+    "accent_text": "#0F172A",
+    "editor_background": "#FFFFFF",
+    "editor_text": "#111827",
+    "status_bar": "#E5E7EB"
+  },
+  "fonts": {
+    "ui_family": "Inter",
+    "ui_size": 16,
+    "editor_family": "Fira Code",
+    "editor_size": 15
+  }
+}

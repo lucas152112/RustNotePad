@@ -1,0 +1,20 @@
+{
+  "name": "Midnight Indigo",
+  "description": "High contrast dark palette tuned for Rust editing",
+  "kind": "dark",
+  "palette": {
+    "background": "#111827",
+    "panel": "#1F2937",
+    "accent": "#2563EB",
+    "accent_text": "#F9FAFB",
+    "editor_background": "#0F172A",
+    "editor_text": "#E5E7EB",
+    "status_bar": "#374151"
+  },
+  "fonts": {
+    "ui_family": "Inter",
+    "ui_size": 16,
+    "editor_family": "JetBrains Mono",
+    "editor_size": 15
+  }
+}

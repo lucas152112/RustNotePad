@@ -2575,6 +2575,7 @@ dependencies = [
  "eframe",
  "egui",
  "once_cell",
+ "rustnotepad_settings",
 ]
 
 [[package]]

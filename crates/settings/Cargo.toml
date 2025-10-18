@@ -3,6 +3,7 @@ name = "rustnotepad_settings"
 version = "0.1.0"
 edition = "2021"
 
+
 [dependencies]
 base64 = { workspace = true }
 
