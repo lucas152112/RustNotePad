@@ -370,9 +370,9 @@ impl RustNotePadApp {
             if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
                 family.push(name);
             }
-        } else {
+        } else if self.font_warning.is_none() {
             self.font_warning = Some(
-                "未找到支援中文字型。請將 NotoSansTC-Regular.otf 放在 assets/fonts/ 並重新啟動 RustNotePad。"
+                "未找到系統內建的繁體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援繁體中文的字型後重啟 RustNotePad。"
                     .into(),
             );
         }
@@ -792,13 +792,41 @@ fn draw_color_badge(ui: &mut egui::Ui, color: Color32) {
 
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("assets/fonts/NotoSansTC-Regular.otf"),
-        manifest_dir.join("../assets/fonts/NotoSansTC-Regular.otf"),
-        PathBuf::from("assets/fonts/NotoSansTC-Regular.otf"),
-        PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansTC-Regular.otf"),
-        PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf"),
-    ];
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    candidates.push(manifest_dir.join("assets/fonts/NotoSansTC-Regular.otf"));
+    candidates.push(manifest_dir.join("../assets/fonts/NotoSansTC-Regular.otf"));
+    candidates.push(PathBuf::from("assets/fonts/NotoSansTC-Regular.otf"));
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.push(PathBuf::from(r"C:\Windows\Fonts\msjh.ttc"));
+        candidates.push(PathBuf::from(r"C:\Windows\Fonts\mingliu.ttc"));
+        candidates.push(PathBuf::from(r"C:\Windows\Fonts\NotoSansTC-Regular.otf"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from(
+            "/System/Library/Fonts/PingFang.ttc",
+        ));
+        candidates.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from(
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ));
+        candidates.push(PathBuf::from(
+            "/usr/share/fonts/opentype/noto/NotoSansTC-Regular.otf",
+        ));
+        candidates.push(PathBuf::from(
+            "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf",
+        ));
+    }
 
     for path in candidates.into_iter().filter(|p| p.exists()) {
         if let Ok(bytes) = fs::read(&path) {
