@@ -1,5 +1,11 @@
 [workspace]
-members = ["rustnotepad_gui", "crates/core", "crates/settings", "apps/cli"]
+members = [
+    "rustnotepad_gui",
+    "crates/core",
+    "crates/settings",
+    "crates/search",
+    "apps/cli",
+]
 resolver = "2"
 
 [workspace.package]
@@ -15,3 +21,4 @@ thiserror = "1.0"
 encoding_rs = "0.8"
 chardetng = "0.1"
 base64 = "0.21"
+regex = "1.10"

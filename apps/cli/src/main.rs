@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rustnotepad_core::{Document, Encoding, LegacyEncoding, LineEnding};
+use rustnotepad_search::{
+    FileSearchResult, ReplaceAllOutcome, SearchEngine, SearchMode, SearchOptions, SearchReport,
+};
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(
@@ -21,6 +25,8 @@ struct Cli {
 enum Commands {
     /// 在不同編碼與行尾間轉換文字檔。 / Convert text files between encodings and line endings.
     Convert(ConvertArgs),
+    /// 搜尋與選用的取代指令。 / Search (and optional replace) across files.
+    Search(SearchArgs),
 }
 
 #[derive(Args)]
@@ -110,6 +116,40 @@ impl From<LineEndingChoice> for LineEnding {
     }
 }
 
+#[derive(Args)]
+struct SearchArgs {
+    /// 搜尋樣式（文字或 regex） / Pattern to search for (literal or regex).
+    pattern: String,
+
+    /// 指定搜尋路徑（檔案或資料夾）；預設為目前目錄。 / Files or directories to search; defaults to current directory.
+    #[arg(value_name = "PATH")]
+    paths: Vec<PathBuf>,
+
+    /// 使用正規表示式。 / Interpret pattern as regex.
+    #[arg(long)]
+    regex: bool,
+
+    /// 區分大小寫。 / Case sensitive search.
+    #[arg(long)]
+    case_sensitive: bool,
+
+    /// 限制完整字詞。 / Match whole words only.
+    #[arg(long)]
+    whole_word: bool,
+
+    /// 讓 '.' 匹配換行字元。 / Treat '.' as matching newlines (regex only).
+    #[arg(long)]
+    dot_matches_newline: bool,
+
+    /// 以指定文字取代。 / Replacement text to apply.
+    #[arg(long, value_name = "TEXT")]
+    replace: Option<String>,
+
+    /// 實際覆寫檔案（需搭配 --replace）。 / Persist replacements to disk (requires --replace).
+    #[arg(long, requires = "replace")]
+    apply: bool,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("Error: {err}");
@@ -121,6 +161,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Convert(args) => execute_convert(args),
+        Commands::Search(args) => execute_search(args),
     }
 }
 
@@ -234,4 +275,161 @@ fn resolve_output_path(
     }
 
     bail!("missing --output or --output-dir for conversion");
+}
+
+fn execute_search(mut args: SearchArgs) -> Result<()> {
+    let mut options = SearchOptions::new(args.pattern);
+    if args.regex {
+        options.mode = SearchMode::Regex;
+    }
+    options.case_sensitive = args.case_sensitive;
+    options.whole_word = args.whole_word;
+    options.dot_matches_newline = args.dot_matches_newline;
+    options.wrap_around = false;
+
+    if args.paths.is_empty() {
+        let cwd = std::env::current_dir().context("failed to determine current directory")?;
+        args.paths.push(cwd);
+    }
+
+    let targets = collect_target_files(&args.paths)?;
+    if targets.is_empty() {
+        println!("No files to search.");
+        return Ok(());
+    }
+
+    let mut entries = Vec::new();
+    let mut applied = Vec::new();
+
+    for path in targets {
+        match handle_file(&path, &options, args.replace.as_deref(), args.apply) {
+            Ok(Some((result, applied_count))) => {
+                if let Some(count) = applied_count {
+                    applied.push((path.clone(), count));
+                }
+                entries.push(result);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("warning: {}: {}", path.display(), err);
+            }
+        }
+    }
+
+    let report = SearchReport::new(entries);
+    if report.is_empty() {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    print_search_report(&report, &options);
+
+    if args.replace.is_some() {
+        if args.apply {
+            for (path, count) in applied {
+                println!("Applied {} replacements to {}", count, path.display());
+            }
+        } else {
+            println!("Dry run only; re-run with --apply to write changes.");
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_target_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_file() {
+            files.push(path.clone());
+        } else if path.is_dir() {
+            for entry in WalkDir::new(path) {
+                match entry {
+                    Ok(entry) => {
+                        if entry.file_type().is_file() {
+                            files.push(entry.path().to_path_buf());
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("warning: {}: {}", path.display(), err);
+                    }
+                }
+            }
+        } else {
+            eprintln!("warning: {} does not exist", path.display());
+        }
+    }
+    Ok(files)
+}
+
+fn handle_file(
+    path: &Path,
+    options: &SearchOptions,
+    replacement: Option<&str>,
+    apply: bool,
+) -> Result<Option<(FileSearchResult, Option<usize>)>> {
+    let mut document =
+        Document::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+
+    if let Some(replacement_text) = replacement {
+        let outcome = {
+            let engine = SearchEngine::new(document.contents());
+            engine.replace_all(replacement_text, options)?
+        };
+
+        if outcome.matches.is_empty() {
+            return Ok(None);
+        }
+
+        let ReplaceAllOutcome {
+            replaced_text,
+            replacements,
+            matches,
+        } = outcome;
+
+        if apply {
+            document.set_contents(replaced_text);
+            document
+                .save()
+                .with_context(|| format!("failed to write {}", path.display()))?;
+        }
+
+        return Ok(Some((
+            FileSearchResult::new(Some(path.to_path_buf()), matches),
+            if apply { Some(replacements) } else { None },
+        )));
+    }
+
+    let matches = {
+        let engine = SearchEngine::new(document.contents());
+        engine.find_all(options)?
+    };
+
+    if matches.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        FileSearchResult::new(Some(path.to_path_buf()), matches),
+        None,
+    )))
+}
+
+fn print_search_report(report: &SearchReport, options: &SearchOptions) {
+    let summary = report.summary();
+    println!(
+        "Search \"{}\" ({} hits in {} files)",
+        options.pattern, summary.total_matches, summary.files_with_matches
+    );
+    for entry in &report.results {
+        let label = entry
+            .path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unsaved>".to_string());
+        println!("  {} ({} hits)", label, entry.matches.len());
+        for m in &entry.matches {
+            println!("    Line {} (Col {}): {}", m.line, m.column, m.line_text);
+        }
+    }
 }
