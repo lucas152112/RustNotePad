@@ -5,6 +5,7 @@
 - Toolbar theme selector does not yet import/export Notepad++ `.xml` themes (JSON only in this milestone).
 - UI language dropdown updates metadata but does not load translation files (strings remain English placeholders).
 - Document map renders text lines only (no minimap scaling or syntax colour overlays).
+- CJK glyph coverage relies on a user-provided font. Place `NotoSansTC-Regular.otf` (or another Traditional Chinese font) under `assets/fonts/` to avoid tofu glyphs.
 
 ## Validation checklist
 - [x] Tab pin/lock behaviour mirrored in layout state (pending drag/drop)

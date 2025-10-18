@@ -1,10 +1,15 @@
 use eframe::{egui, App, Frame, NativeOptions};
-use egui::{vec2, Align, Color32, FontFamily, FontId, Layout, RichText, TextStyle};
+use egui::{
+    vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
+    TextStyle,
+};
 use once_cell::sync::Lazy;
 use rustnotepad_settings::{
     Color, LayoutConfig, PaneLayout, PaneRole, ResolvedPalette, TabColorTag, TabView,
     ThemeDefinition, ThemeKind, ThemeManager,
 };
+use std::fs;
+use std::path::{Path, PathBuf};
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview
@@ -239,6 +244,8 @@ struct RustNotePadApp {
     palette: ResolvedPalette,
     status: StatusBarState,
     pending_theme_refresh: bool,
+    fonts_installed: bool,
+    font_warning: Option<String>,
 }
 
 impl Default for RustNotePadApp {
@@ -283,6 +290,8 @@ impl Default for RustNotePadApp {
             palette,
             status,
             pending_theme_refresh: true,
+            fonts_installed: false,
+            font_warning: None,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app
@@ -298,6 +307,7 @@ impl RustNotePadApp {
     }
 
     fn apply_active_theme(&mut self, ctx: &egui::Context) {
+        self.ensure_fonts(ctx);
         self.palette = self.theme_manager.active_palette().clone();
         let definition = self.theme_manager.active_theme();
 
@@ -342,6 +352,33 @@ impl RustNotePadApp {
         ctx.set_style(style);
 
         self.status.set_theme(&definition.name);
+    }
+
+    fn ensure_fonts(&mut self, ctx: &egui::Context) {
+        if self.fonts_installed {
+            return;
+        }
+
+        let mut definitions = FontDefinitions::default();
+        if let Some((name, data)) = load_cjk_font() {
+            definitions
+                .font_data
+                .insert(name.clone(), FontData::from_owned(data));
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
+                family.insert(0, name.clone());
+            }
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
+                family.push(name);
+            }
+        } else {
+            self.font_warning = Some(
+                "未找到支援中文字型。請將 NotoSansTC-Regular.otf 放在 assets/fonts/ 並重新啟動 RustNotePad。"
+                    .into(),
+            );
+        }
+
+        ctx.set_fonts(definitions);
+        self.fonts_installed = true;
     }
 
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
@@ -427,6 +464,15 @@ impl RustNotePadApp {
                         ui.label(format!("Pinned tabs: {pinned_count}"));
                     });
                 });
+
+                if let Some(warning) = &self.font_warning {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(warning)
+                            .color(Color32::from_rgb(239, 68, 68))
+                            .italics(),
+                    );
+                }
             });
     }
 
@@ -742,6 +788,24 @@ fn parse_tag_color(tag: TabColorTag) -> Color {
 fn draw_color_badge(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
+}
+
+fn load_cjk_font() -> Option<(String, Vec<u8>)> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("assets/fonts/NotoSansTC-Regular.otf"),
+        manifest_dir.join("../assets/fonts/NotoSansTC-Regular.otf"),
+        PathBuf::from("assets/fonts/NotoSansTC-Regular.otf"),
+        PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansTC-Regular.otf"),
+        PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf"),
+    ];
+
+    for path in candidates.into_iter().filter(|p| p.exists()) {
+        if let Ok(bytes) = fs::read(&path) {
+            return Some(("cjk_fallback".into(), bytes));
+        }
+    }
+    None
 }
 
 fn main() -> eframe::Result<()> {

@@ -55,4 +55,6 @@ Running the GUI (`cargo run -p rustnotepad_gui`) now provides:
 - Bottom dock tabs for Find Results / Console / Notifications / LSP diagnostics.
 - Status bar metrics (line/column, selection, encoding, language, theme, UI language).
 
+> **Tip:** To avoid tofu glyphs for Traditional Chinese, drop `NotoSansTC-Regular.otf` (or any CJK-capable font) into `assets/fonts/`. The preview will pick it up on the next launch.
+
 These surfaces will be reused by the production Tauri shell once the core editor and persistence layers are bolted in, so exercising them now validates the new state providers.
