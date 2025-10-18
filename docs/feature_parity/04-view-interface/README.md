@@ -11,7 +11,7 @@
 - [x] UI layout system implementation
 - [x] Theme/appearance management implemented
 - [x] Unit tests for layout serialization
-- [ ] E2E UI regression coverage
+- [x] E2E UI regression coverage (`crates/settings/tests/ui_layout_regression.rs`)
 - [x] `compatibility.md` updated with differences
 - [x] Documentation / screenshots updated
 

@@ -807,9 +807,7 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
 
     #[cfg(target_os = "macos")]
     {
-        candidates.push(PathBuf::from(
-            "/System/Library/Fonts/PingFang.ttc",
-        ));
+        candidates.push(PathBuf::from("/System/Library/Fonts/PingFang.ttc"));
         candidates.push(PathBuf::from(
             "/System/Library/Fonts/Supplemental/Songti.ttc",
         ));
