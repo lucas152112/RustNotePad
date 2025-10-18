@@ -1,4 +1,7 @@
-# RustNotePad / RustNotePad（繁體中文）
+# RustNotePad / RustNotePad（正體中文）
+
+Because Notepad++ is Windows-only, RustNotePad reimplements it in Rust so Linux and other platforms can work seamlessly with Traditional Chinese content.  
+由於 Notepad++ 僅提供 Windows 版本，RustNotePad 以 Rust 重新實作，讓 Linux 等平台也能順暢處理正體中文內容。
 
 RustNotePad is a long-term effort to recreate the full Notepad++ experience using Rust.  
 RustNotePad 旨在以 Rust 重現 Notepad++ 的完整功能，提供跨平台且現代化的編輯體驗。
