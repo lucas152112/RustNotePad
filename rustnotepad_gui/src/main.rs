@@ -46,20 +46,30 @@ impl MenuSection {
 
 #[derive(Clone, Copy)]
 struct ProjectNode {
-    name: &'static str,
+    label: &'static str,
+    path: Option<&'static str>,
     children: &'static [ProjectNode],
 }
 
 impl ProjectNode {
-    const fn leaf(name: &'static str) -> Self {
+    const fn branch(label: &'static str, children: &'static [ProjectNode]) -> Self {
         Self {
-            name,
+            label,
+            path: None,
+            children,
+        }
+    }
+
+    const fn leaf(label: &'static str, path: &'static str) -> Self {
+        Self {
+            label,
+            path: Some(path),
             children: &[],
         }
     }
 
     fn is_leaf(&self) -> bool {
-        self.children.is_empty()
+        self.path.is_some()
     }
 }
 
@@ -133,56 +143,47 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
 });
 
 const CORE_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("document.rs"),
-    ProjectNode::leaf("editor.rs"),
-    ProjectNode::leaf("search_session.rs"),
+    ProjectNode::leaf("document.rs", "crates/core/src/document.rs"),
+    ProjectNode::leaf("editor.rs", "crates/core/src/editor.rs"),
+    ProjectNode::leaf("search_session.rs", "crates/core/src/search_session.rs"),
 ];
 
 const SEARCH_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("Cargo.toml"),
-    ProjectNode::leaf("src/lib.rs"),
+    ProjectNode::leaf("Cargo.toml", "crates/search/Cargo.toml"),
+    ProjectNode::leaf("src/lib.rs", "crates/search/src/lib.rs"),
 ];
 
 const CRATES_CHILDREN: &[ProjectNode] = &[
-    ProjectNode {
-        name: "core",
-        children: CORE_FILES,
-    },
-    ProjectNode {
-        name: "search",
-        children: SEARCH_FILES,
-    },
+    ProjectNode::branch("core", CORE_FILES),
+    ProjectNode::branch("search", SEARCH_FILES),
 ];
 
 const FEATURE_PARITY_DOCS: &[ProjectNode] = &[
-    ProjectNode::leaf("03-search-replace/design.md"),
-    ProjectNode::leaf("04-view-interface/design.md"),
+    ProjectNode::leaf(
+        "03-search-replace/design.md",
+        "docs/feature_parity/03-search-replace/design.md",
+    ),
+    ProjectNode::leaf(
+        "04-view-interface/design.md",
+        "docs/feature_parity/04-view-interface/design.md",
+    ),
 ];
 
-const DOCS_CHILDREN: &[ProjectNode] = &[ProjectNode {
-    name: "feature_parity",
-    children: FEATURE_PARITY_DOCS,
-}];
+const DOCS_CHILDREN: &[ProjectNode] = &[ProjectNode::branch("feature_parity", FEATURE_PARITY_DOCS)];
 
 const TEST_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("search_workflow.rs"),
-    ProjectNode::leaf("search_large_workspace.rs"),
+    ProjectNode::leaf("search_workflow.rs", "tests/search_workflow.rs"),
+    ProjectNode::leaf(
+        "search_large_workspace.rs",
+        "tests/search_large_workspace.rs",
+    ),
 ];
 
 static PROJECT_TREE: Lazy<Vec<ProjectNode>> = Lazy::new(|| {
     vec![
-        ProjectNode {
-            name: "crates",
-            children: CRATES_CHILDREN,
-        },
-        ProjectNode {
-            name: "docs",
-            children: DOCS_CHILDREN,
-        },
-        ProjectNode {
-            name: "tests",
-            children: TEST_FILES,
-        },
+        ProjectNode::branch("crates", CRATES_CHILDREN),
+        ProjectNode::branch("docs", DOCS_CHILDREN),
+        ProjectNode::branch("tests", TEST_FILES),
     ]
 });
 
@@ -235,10 +236,6 @@ impl StatusBarState {
         self.column = last_line.chars().count().saturating_add(1);
     }
 
-    fn set_ui_language(&mut self, locale: &str) {
-        self.ui_language = locale.to_string();
-    }
-
     fn set_theme(&mut self, theme_name: &str) {
         self.theme = theme_name.to_string();
     }
@@ -262,6 +259,8 @@ struct RustNotePadApp {
     autocomplete_engine: CompletionEngine,
     completion_prefix: String,
     completion_results: Vec<CompletionItem>,
+    current_document_id: String,
+    current_language_id: String,
 }
 
 impl Default for RustNotePadApp {
@@ -275,7 +274,7 @@ impl Default for RustNotePadApp {
         });
         let palette = theme_manager.active_palette().clone();
         let layout = LayoutConfig::default();
-        let locales = vec!["English (en-US)", "正體中文 (zh-TW)", "Deutsch (de-DE)"];
+        let locales = vec!["English (en-US)"];
         let selected_locale = 0usize;
         let active_panel_index = layout
             .bottom_dock
@@ -328,6 +327,8 @@ impl Default for RustNotePadApp {
             autocomplete_engine,
             completion_prefix,
             completion_results: Vec::new(),
+            current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
+            current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -373,12 +374,119 @@ impl RustNotePadApp {
 
     fn refresh_completions(&mut self) {
         let request = CompletionRequest::new(
-            Some(PREVIEW_DOCUMENT_ID.to_string()),
+            Some(self.current_document_id.clone()),
             self.completion_prefix.clone(),
         )
         .with_max_items(16);
         let result = self.autocomplete_engine.request(request);
         self.completion_results = result.items;
+    }
+
+    fn open_document(&mut self, path: &str, display: &str) {
+        if self.activate_tab(path) {
+            return;
+        }
+        let file_name = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(display);
+        let mut tab = TabView::new(path, file_name);
+        let language_id = language_id_from_path(path);
+        tab.language = Some(language_display_name(language_id).to_string());
+        if let Some(pane) = self
+            .layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.role == PaneRole::Primary)
+        {
+            pane.tabs.push(tab);
+            pane.active = Some(path.to_string());
+        }
+        self.activate_tab(path);
+    }
+
+    fn activate_tab(&mut self, tab_id: &str) -> bool {
+        let mut activated = false;
+        for pane in &mut self.layout.panes {
+            if pane.tabs.iter().any(|tab| tab.id == tab_id) {
+                pane.active = Some(tab_id.to_string());
+                activated = true;
+            }
+        }
+        if activated {
+            if let Some(tab) = self
+                .layout
+                .panes
+                .iter()
+                .flat_map(|pane| pane.tabs.iter())
+                .find(|tab| tab.id == tab_id)
+                .cloned()
+            {
+                self.load_document(&tab.id, tab.language.as_deref());
+            }
+            self.status.refresh_from_layout(&self.layout);
+        }
+        activated
+    }
+
+    fn load_document(&mut self, path: &str, language_hint: Option<&str>) {
+        let contents = fs::read_to_string(path)
+            .unwrap_or_else(|_| format!("// Unable to open {path}\n// 無法開啟 {path}\n"));
+        self.editor_preview = contents;
+        self.current_document_id = path.to_string();
+        let language_id = language_hint
+            .and_then(language_id_from_hint)
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| language_id_from_path(path).to_string());
+        self.current_language_id = language_id.clone();
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.status.refresh_cursor(&self.editor_preview);
+        self.status.document_language = language_display_name(&language_id).to_string();
+        self.status.selection = 0;
+        self.refresh_completions();
+    }
+
+    fn close_tab(&mut self, role: PaneRole, tab_id: &str) {
+        if let Some(pane) = self.layout.panes.iter_mut().find(|pane| pane.role == role) {
+            if let Some(pos) = pane
+                .tabs
+                .iter()
+                .position(|tab| tab.id == tab_id && !tab.is_locked && !tab.is_pinned)
+            {
+                pane.tabs.remove(pos);
+                if pane.active.as_deref() == Some(tab_id) {
+                    let new_active = pane
+                        .tabs
+                        .get(pos.min(pane.tabs.len().saturating_sub(1)))
+                        .map(|tab| tab.id.clone());
+                    pane.active = new_active;
+                }
+            }
+        }
+
+        if self.current_document_id == tab_id {
+            if let Some(active_tab) = self
+                .layout
+                .panes
+                .iter()
+                .find_map(|pane| pane.active_tab())
+                .cloned()
+            {
+                self.load_document(&active_tab.id, active_tab.language.as_deref());
+            } else {
+                self.editor_preview = SAMPLE_EDITOR_CONTENT.to_string();
+                self.current_document_id = PREVIEW_DOCUMENT_ID.to_string();
+                self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
+                self.document_index
+                    .update_document(&self.current_document_id, &self.editor_preview);
+                self.status.refresh_cursor(&self.editor_preview);
+                self.status.document_language = "Plain Text".into();
+                self.refresh_completions();
+            }
+        }
+
+        self.status.refresh_from_layout(&self.layout);
     }
 
     fn apply_active_theme(&mut self, ctx: &egui::Context) {
@@ -501,23 +609,13 @@ impl RustNotePadApp {
                     }
 
                     ui.separator();
-                    let mut locale_index = self.selected_locale;
-                    egui::ComboBox::from_id_source("locale_selector")
-                        .width(180.0)
-                        .selected_text(self.available_locales[locale_index])
-                        .show_ui(ui, |ui| {
-                            for (idx, locale) in self.available_locales.iter().enumerate() {
-                                let selected = idx == locale_index;
-                                if ui.selectable_label(selected, *locale).clicked() {
-                                    locale_index = idx;
-                                }
-                            }
-                        });
-                    if locale_index != self.selected_locale {
-                        self.selected_locale = locale_index;
-                        self.status
-                            .set_ui_language(self.available_locales[self.selected_locale]);
-                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "UI Locale / 介面語系: {}",
+                            self.available_locales[self.selected_locale]
+                        ))
+                        .italics(),
+                    );
 
                     ui.separator();
                     let mut ratio = self.layout.split_ratio;
@@ -562,6 +660,9 @@ impl RustNotePadApp {
                     for node in PROJECT_TREE.iter() {
                         self.render_project_node(ui, node, 0);
                     }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    self.render_highlight_summary(ui);
                     ui.add_space(10.0);
                     ui.separator();
                     self.render_function_list_panel(ui);
@@ -740,13 +841,11 @@ impl RustNotePadApp {
                                             self.editor_preview = buffer;
                                             self.status.refresh_cursor(&self.editor_preview);
                                             self.document_index.update_document(
-                                                PREVIEW_DOCUMENT_ID,
+                                                &self.current_document_id,
                                                 &self.editor_preview,
                                             );
                                             self.refresh_completions();
                                         }
-
-                                        self.render_editor_insights(ui);
                                     });
                             },
                         );
@@ -776,24 +875,11 @@ impl RustNotePadApp {
         });
     }
 
-    fn render_editor_insights(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-        ui.label(RichText::new("Editor Insights / 編輯器分析").strong());
-        ui.add_space(6.0);
-        ui.columns(3, |columns| {
-            self.render_highlight_summary(&mut columns[0]);
-            self.render_function_list_panel(&mut columns[1]);
-            self.render_completion_panel(&mut columns[2]);
-        });
-    }
-
     fn render_highlight_summary(&self, ui: &mut egui::Ui) {
         ui.heading("Syntax Highlight / 語法高亮摘要");
         match self
             .highlight_registry
-            .highlight(PREVIEW_LANGUAGE_ID, &self.editor_preview)
+            .highlight(self.current_language_id.as_str(), &self.editor_preview)
         {
             Ok(tokens) => {
                 ui.label(format!("Tokens: {}", tokens.len()));
@@ -829,16 +915,25 @@ impl RustNotePadApp {
         }
     }
 
-    fn render_function_list_panel(&self, ui: &mut egui::Ui) {
+    fn render_function_list_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Function List / 函式清單");
         match self
             .function_registry
-            .parse(PREVIEW_LANGUAGE_ID, &self.editor_preview)
+            .parse(self.current_language_id.as_str(), &self.editor_preview)
         {
             Some(entries) if !entries.is_empty() => {
                 for entry in entries.iter().take(10) {
                     let line = line_number_for_range(&self.editor_preview, &entry.range);
-                    ui.label(format!("{:?} {} (Ln {line})", entry.kind, entry.name));
+                    let label = format!("{:?} {} (Ln {line})", entry.kind, entry.name);
+                    if ui
+                        .selectable_label(false, label)
+                        .on_hover_text("Go to symbol / 跳至符號")
+                        .clicked()
+                    {
+                        self.status.line = line;
+                        self.status.column = 1;
+                        self.status.selection = 0;
+                    }
                 }
                 if entries.len() > 10 {
                     let remaining = entries.len() - 10;
@@ -869,13 +964,24 @@ impl RustNotePadApp {
         if self.completion_results.is_empty() {
             ui.label("No suggestions available. / 目前沒有建議。");
         } else {
-            for item in self.completion_results.iter().take(10) {
-                let kind = format!("{:?}", item.kind);
-                let detail = item.detail.as_deref().unwrap_or("");
-                if detail.is_empty() {
-                    ui.label(format!("{kind} — {}", item.label));
-                } else {
-                    ui.label(format!("{kind} — {} ({detail})", item.label));
+            let visible = self.completion_results.len().min(10);
+            for idx in 0..visible {
+                if let Some(item) = self.completion_results.get(idx) {
+                    let kind = format!("{:?}", item.kind);
+                    let detail = item.detail.as_deref().unwrap_or("");
+                    let label = if detail.is_empty() {
+                        format!("{kind} — {}", item.label)
+                    } else {
+                        format!("{kind} — {} ({detail})", item.label)
+                    };
+                    if ui
+                        .selectable_label(false, label)
+                        .on_hover_text("Apply suggestion / 套用建議")
+                        .clicked()
+                    {
+                        self.completion_prefix = item.label.clone();
+                        self.refresh_completions();
+                    }
                 }
             }
             if self.completion_results.len() > 10 {
@@ -938,20 +1044,40 @@ impl RustNotePadApp {
                 button = button.fill(color32_from_color(self.palette.accent));
             }
             if ui.add(button).clicked() {
-                if self.layout.set_active_tab(role, &tab.id) {
+                if self.activate_tab(&tab.id) {
                     self.status.refresh_from_layout(&self.layout);
+                }
+            }
+
+            if !tab.is_pinned && !tab.is_locked {
+                let close = egui::Button::new(RichText::new("✕").small()).frame(false);
+                if ui
+                    .add(close)
+                    .on_hover_text("Close tab / 關閉分頁")
+                    .clicked()
+                {
+                    self.close_tab(role, &tab.id);
                 }
             }
         });
         ui.add_space(6.0);
     }
 
-    fn render_project_node(&self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
+    fn render_project_node(&mut self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
         let indent = "    ".repeat(depth);
         if node.is_leaf() {
-            ui.label(format!("{indent}{}", node.name));
+            let label = format!("{indent}{}", node.label);
+            if ui
+                .selectable_label(false, label)
+                .on_hover_text("Open document / 開啟文件")
+                .clicked()
+            {
+                if let Some(path) = node.path {
+                    self.open_document(path, node.label);
+                }
+            }
         } else {
-            egui::CollapsingHeader::new(format!("{indent}{}", node.name))
+            egui::CollapsingHeader::new(format!("{indent}{}", node.label))
                 .default_open(depth < 2)
                 .show(ui, |ui| {
                     for child in node.children.iter() {
@@ -990,6 +1116,44 @@ fn parse_tag_color(tag: TabColorTag) -> Color {
 fn draw_color_badge(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
+}
+
+fn language_id_from_path(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "rs" => "rust",
+        "json" => "json",
+        "toml" => "plaintext",
+        "md" => "plaintext",
+        _ => "plaintext",
+    }
+}
+
+fn language_id_from_hint(hint: &str) -> Option<&'static str> {
+    match hint.to_lowercase().replace(' ', "").as_str() {
+        "rust" => Some("rust"),
+        "json" => Some("json"),
+        "plaintext" => Some("plaintext"),
+        "markdown" => Some("plaintext"),
+        _ => None,
+    }
+}
+
+fn language_display_name(language_id: &str) -> &'static str {
+    match language_id {
+        "rust" => "Rust",
+        "json" => "JSON",
+        "plaintext" => "Plain Text",
+        other => match other {
+            "markdown" => "Markdown",
+            _ => "Plain Text",
+        },
+    }
 }
 
 fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
