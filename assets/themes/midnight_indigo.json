@@ -16,5 +16,27 @@
     "ui_size": 16,
     "editor_family": "JetBrains Mono",
     "editor_size": 15
+  },
+  "syntax": {
+    "keyword": {
+      "foreground": "#93C5FD",
+      "bold": true
+    },
+    "string": {
+      "foreground": "#FBBF24"
+    },
+    "comment": {
+      "foreground": "#6B7280",
+      "italic": true
+    },
+    "number": {
+      "foreground": "#F97316"
+    },
+    "operator": {
+      "foreground": "#A855F7"
+    },
+    "identifier": {
+      "foreground": "#E5E7EB"
+    }
   }
 }

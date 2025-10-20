@@ -1,10 +1,14 @@
 [workspace]
 members = [
     "rustnotepad_gui",
+    "crates/autocomplete",
     "crates/core",
+    "crates/highlight",
+    "crates/function_list",
     "crates/settings",
     "crates/search",
     "apps/cli",
+    "rust_sandbox_test",
 ]
 resolver = "2"
 

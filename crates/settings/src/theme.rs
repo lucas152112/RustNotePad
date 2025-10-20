@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::json::{self, JsonValue};
+use rustnotepad_highlight::{parse_highlight_palette, HighlightPalette, ThemeParseError};
+use serde_json::json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -32,13 +34,14 @@ pub struct ResolvedPalette {
     pub status_bar: Color,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ThemeDefinition {
     pub name: String,
     pub description: Option<String>,
     pub kind: ThemeKind,
     pub palette: ThemePalette,
     pub fonts: FontSettings,
+    pub syntax: Option<HighlightPalette>,
 }
 
 impl ThemeDefinition {
@@ -62,6 +65,7 @@ impl ThemeDefinition {
                 editor_family: "JetBrains Mono".into(),
                 editor_size: 15,
             },
+            syntax: Some(builtin_dark_syntax()),
         }
     }
 
@@ -85,6 +89,7 @@ impl ThemeDefinition {
                 editor_family: "Fira Code".into(),
                 editor_size: 15,
             },
+            syntax: Some(builtin_light_syntax()),
         }
     }
 
@@ -130,14 +135,78 @@ impl ThemeDefinition {
             .ok_or(ThemeLoadError::MissingField("fonts"))?;
         let fonts = FontSettings::from_json(fonts_value)?;
 
+        let syntax = match map.get("syntax") {
+            Some(value) => Some(parse_syntax_palette(value)?),
+            None => None,
+        };
+
         Ok(Self {
             name,
             description,
             kind,
             palette,
             fonts,
+            syntax,
         })
     }
+
+    pub fn syntax_palette(&self) -> Option<&HighlightPalette> {
+        self.syntax.as_ref()
+    }
+}
+
+fn builtin_dark_syntax() -> HighlightPalette {
+    parse_highlight_palette(&json!({
+        "keyword": { "foreground": "#93C5FD", "bold": true },
+        "string": { "foreground": "#FBBF24" },
+        "comment": { "foreground": "#6B7280", "italic": true },
+        "number": { "foreground": "#F97316" },
+        "operator": { "foreground": "#A855F7" },
+        "identifier": { "foreground": "#E5E7EB" }
+    }))
+    .expect("builtin syntax palette must be valid")
+}
+
+fn builtin_light_syntax() -> HighlightPalette {
+    parse_highlight_palette(&json!({
+        "keyword": { "foreground": "#1D4ED8", "bold": true },
+        "string": { "foreground": "#B45309" },
+        "comment": { "foreground": "#9CA3AF", "italic": true },
+        "number": { "foreground": "#D97706" },
+        "operator": { "foreground": "#6366F1" },
+        "identifier": { "foreground": "#1F2937" }
+    }))
+    .expect("builtin syntax palette must be valid")
+}
+
+fn parse_syntax_palette(value: &JsonValue) -> Result<HighlightPalette, ThemeLoadError> {
+    let serde_value = to_serde_value(value)?;
+    parse_highlight_palette(&serde_value).map_err(ThemeLoadError::from)
+}
+
+fn to_serde_value(value: &JsonValue) -> Result<serde_json::Value, ThemeLoadError> {
+    Ok(match value {
+        JsonValue::Null => serde_json::Value::Null,
+        JsonValue::Bool(flag) => serde_json::Value::Bool(*flag),
+        JsonValue::Number(num) => serde_json::Number::from_f64(*num)
+            .map(serde_json::Value::Number)
+            .ok_or(ThemeLoadError::InvalidField("syntax"))?,
+        JsonValue::String(text) => serde_json::Value::String(text.clone()),
+        JsonValue::Array(values) => {
+            let mut array = Vec::with_capacity(values.len());
+            for item in values {
+                array.push(to_serde_value(item)?);
+            }
+            serde_json::Value::Array(array)
+        }
+        JsonValue::Object(map) => {
+            let mut object = serde_json::Map::with_capacity(map.len());
+            for (key, item) in map {
+                object.insert(key.clone(), to_serde_value(item)?);
+            }
+            serde_json::Value::Object(object)
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +429,7 @@ pub enum ThemeLoadError {
     MissingField(&'static str),
     InvalidKind(String),
     Empty,
+    Syntax(ThemeParseError),
 }
 
 impl fmt::Display for ThemeLoadError {
@@ -377,6 +447,7 @@ impl fmt::Display for ThemeLoadError {
             ThemeLoadError::MissingField(field) => write!(f, "missing field '{field}'"),
             ThemeLoadError::InvalidKind(value) => write!(f, "invalid theme kind '{value}'"),
             ThemeLoadError::Empty => write!(f, "no theme definitions were provided"),
+            ThemeLoadError::Syntax(err) => err.fmt(f),
         }
     }
 }
@@ -392,6 +463,12 @@ impl From<std::io::Error> for ThemeLoadError {
 impl From<json::JsonError> for ThemeLoadError {
     fn from(value: json::JsonError) -> Self {
         ThemeLoadError::Json(value)
+    }
+}
+
+impl From<ThemeParseError> for ThemeLoadError {
+    fn from(value: ThemeParseError) -> Self {
+        ThemeLoadError::Syntax(value)
     }
 }
 
@@ -522,6 +599,10 @@ mod tests {
                 "ui_size": 15,
                 "editor_family": "JetBrains Mono",
                 "editor_size": 14
+            },
+            "syntax": {
+                "keyword": { "foreground": "#35A2FF" },
+                "comment": { "foreground": "#607090" }
             }
         }
         "##;
@@ -532,5 +613,40 @@ mod tests {
         assert_eq!(manager.active_theme().name, "Nightfall");
         manager.set_active_by_name("Nightfall");
         assert_eq!(manager.active_palette().accent.r, 0x3B);
+        assert!(manager
+            .active_theme()
+            .syntax_palette()
+            .and_then(|palette| palette.style_for(&rustnotepad_highlight::HighlightKind::Keyword))
+            .is_some());
+    }
+
+    #[test]
+    fn syntax_palette_is_optional() {
+        let json = json::parse(
+            r##"
+            {
+                "name": "Minimal",
+                "kind": "dark",
+                "palette": {
+                    "background": "#000000",
+                    "panel": "#000000",
+                    "accent": "#FFFFFF",
+                    "accent_text": "#000000",
+                    "editor_background": "#000000",
+                    "editor_text": "#FFFFFF",
+                    "status_bar": "#000000"
+                },
+                "fonts": {
+                    "ui_family": "Inter",
+                    "ui_size": 14,
+                    "editor_family": "JetBrains Mono",
+                    "editor_size": 13
+                }
+            }
+        "##,
+        )
+        .unwrap();
+        let theme = ThemeDefinition::from_json(&json).unwrap();
+        assert!(theme.syntax_palette().is_none());
     }
 }

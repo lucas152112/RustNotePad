@@ -16,5 +16,27 @@
     "ui_size": 16,
     "editor_family": "Fira Code",
     "editor_size": 15
+  },
+  "syntax": {
+    "keyword": {
+      "foreground": "#1D4ED8",
+      "bold": true
+    },
+    "string": {
+      "foreground": "#B45309"
+    },
+    "comment": {
+      "foreground": "#9CA3AF",
+      "italic": true
+    },
+    "number": {
+      "foreground": "#D97706"
+    },
+    "operator": {
+      "foreground": "#6366F1"
+    },
+    "identifier": {
+      "foreground": "#1F2937"
+    }
   }
 }

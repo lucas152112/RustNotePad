@@ -6,6 +6,8 @@ edition = "2021"
 
 [dependencies]
 base64 = { workspace = true }
+rustnotepad_highlight = { path = "../highlight" }
+serde_json = "1.0"
 
 [dev-dependencies]
 tempfile = "3.10"

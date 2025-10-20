@@ -259,7 +259,7 @@ impl Default for RustNotePadApp {
         });
         let palette = theme_manager.active_palette().clone();
         let layout = LayoutConfig::default();
-        let locales = vec!["English (en-US)", "繁體中文 (zh-TW)", "Deutsch (de-DE)"];
+        let locales = vec!["English (en-US)", "正體中文 (zh-TW)", "Deutsch (de-DE)"];
         let selected_locale = 0usize;
         let active_panel_index = layout
             .bottom_dock
@@ -372,7 +372,7 @@ impl RustNotePadApp {
             }
         } else if self.font_warning.is_none() {
             self.font_warning = Some(
-                "未找到系統內建的繁體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援繁體中文的字型後重啟 RustNotePad。"
+                "未找到系統內建的正體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援正體中文的字型後重啟 RustNotePad。"
                     .into(),
             );
         }

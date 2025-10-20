@@ -85,7 +85,13 @@ pub fn replace_columnar(
     }
 
     buffer.apply_edit_plan(ops)?;
-    update_carets(buffer, start_line, end_line, normalized.start_column, payload)?;
+    update_carets(
+        buffer,
+        start_line,
+        end_line,
+        normalized.start_column,
+        payload,
+    )?;
     Ok(())
 }
 
@@ -183,12 +189,7 @@ mod tests {
     fn replace_columnar_inserts_text_with_padding() {
         let mut buffer = EditorBuffer::new("one\nlonger line\nshort");
         let payload = vec!["X".into()];
-        replace_columnar(
-            &mut buffer,
-            ColumnSelection::new(0, 2, 2, 4),
-            &payload,
-        )
-        .unwrap();
+        replace_columnar(&mut buffer, ColumnSelection::new(0, 2, 2, 4), &payload).unwrap();
         assert_eq!(buffer.contents(), "onX\nloXer line\nshXt");
     }
 
@@ -196,12 +197,7 @@ mod tests {
     fn replace_columnar_per_line_payload() {
         let mut buffer = EditorBuffer::new("a\nb\nc");
         let payload = vec!["1".into(), "22".into(), "333".into()];
-        replace_columnar(
-            &mut buffer,
-            ColumnSelection::new(0, 2, 0, 0),
-            &payload,
-        )
-        .unwrap();
+        replace_columnar(&mut buffer, ColumnSelection::new(0, 2, 0, 0), &payload).unwrap();
         assert_eq!(buffer.contents(), "1a\n22b\n333c");
         assert_eq!(buffer.carets().len(), 3);
     }

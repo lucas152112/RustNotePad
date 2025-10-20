@@ -150,18 +150,13 @@ impl SplitViewState {
     /// 列出面板中的標籤。 / Returns the tabs contained in the given pane.
     pub fn tabs_in(&self, pane: Pane) -> impl Iterator<Item = &TabRecord> {
         let pane_state = self.pane_ref(pane);
-        pane_state
-            .tabs
-            .iter()
-            .filter_map(|id| self.tabs.get(id))
+        pane_state.tabs.iter().filter_map(|id| self.tabs.get(id))
     }
 
     /// 回傳目前的啟動標籤。 / Returns the active tab for the pane.
     pub fn active_tab(&self, pane: Pane) -> Option<&TabRecord> {
         let pane_state = self.pane_ref(pane);
-        pane_state
-            .active
-            .and_then(|id| self.tabs.get(&id))
+        pane_state.active.and_then(|id| self.tabs.get(&id))
     }
 
     /// 更新髒狀態。 / Marks a tab dirty or clean.
@@ -235,9 +230,6 @@ mod tests {
         let t1 = state.open_tab(Pane::Primary, "a.txt", None);
         let t2 = state.open_tab(Pane::Primary, "b.txt", None);
         assert!(state.close_tab(t1));
-        assert_eq!(
-            state.active_tab(Pane::Primary).map(|tab| tab.id),
-            Some(t2)
-        );
+        assert_eq!(state.active_tab(Pane::Primary).map(|tab| tab.id), Some(t2));
     }
 }

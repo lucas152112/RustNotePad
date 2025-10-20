@@ -128,7 +128,10 @@ pub fn trim_trailing_whitespace(buffer: &mut EditorBuffer) -> Result<usize, Edit
 }
 
 /// 對選取範圍的文字進行大小寫轉換。 / Applies a case transformation to the active selection or whole buffer.
-pub fn convert_case(buffer: &mut EditorBuffer, transform: CaseTransform) -> Result<(), EditorError> {
+pub fn convert_case(
+    buffer: &mut EditorBuffer,
+    transform: CaseTransform,
+) -> Result<(), EditorError> {
     let text = buffer.contents();
     let (start, end) = selection_span(buffer, text);
     if start == end {
@@ -303,8 +306,10 @@ fn clamp_selection(buffer: &mut EditorBuffer, start: usize, end: usize) {
         buffer.clear_carets();
     }
     if let Some(caret) = buffer.carets_mut().first_mut() {
-        *caret =
-            crate::editor::Caret::with_selection(clamped_end, Selection::new(clamped_start, clamped_end));
+        *caret = crate::editor::Caret::with_selection(
+            clamped_end,
+            Selection::new(clamped_start, clamped_end),
+        );
     }
 }
 

@@ -86,9 +86,7 @@ mod tests {
 
     #[test]
     fn build_map_generates_even_segments() {
-        let text = (0..100)
-            .map(|i| format!("Line {i}\n"))
-            .collect::<String>();
+        let text = (0..100).map(|i| format!("Line {i}\n")).collect::<String>();
         let entries = build_document_map(&text, 10);
         assert!(entries.len() <= 10);
         assert_eq!(entries.first().unwrap().line, 0);
