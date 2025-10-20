@@ -39,10 +39,7 @@ impl BookmarkManager {
 
     /// 取得前一個書籤行。 / Finds the previous bookmark before the provided line.
     pub fn previous_before(&self, line: usize) -> Option<usize> {
-        self.bookmarks
-            .range(..line)
-            .next_back()
-            .copied()
+        self.bookmarks.range(..line).next_back().copied()
     }
 
     /// 以遞增順序列出所有書籤。 / Iterates bookmarks in ascending order.
@@ -75,7 +72,9 @@ mod tests {
         let mut manager = BookmarkManager::default();
         assert!(manager.toggle(5));
         assert!(manager.toggle(10));
-        assert!(!manager.toggle(5)); // removed
+        // Removing an existing bookmark should return false.
+        // 移除既有書籤時應回傳 false。
+        assert!(!manager.toggle(5));
         assert_eq!(manager.len(), 1);
         assert!(manager.is_bookmarked(10));
         let collected: Vec<_> = manager.iter().collect();

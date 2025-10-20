@@ -9,6 +9,7 @@ use rustnotepad_search::{
 use crate::{BookmarkManager, Document};
 
 /// Tracks the active search context for a document, including cached matches and bookmark marks.
+/// （追蹤文件目前的搜尋狀態，包含快取結果與書籤標記。）
 #[derive(Debug, Clone)]
 pub struct SearchSession {
     options: SearchOptions,
@@ -19,6 +20,7 @@ pub struct SearchSession {
 
 impl SearchSession {
     /// Creates a new session with the provided options. The caller must invoke [`refresh`] before searching.
+    /// （以指定選項建立新的搜尋會話；在搜尋前必須呼叫 [`refresh`]。）
     pub fn new(options: SearchOptions) -> Result<Self, SearchError> {
         options.validate()?;
         Ok(Self {
@@ -30,11 +32,13 @@ impl SearchSession {
     }
 
     /// Returns a shared reference to the underlying options.
+    /// （提供搜尋選項的唯讀參考。）
     pub fn options(&self) -> &SearchOptions {
         &self.options
     }
 
     /// Returns a mutable reference to the options, clearing cached state.
+    /// （取得可變搜尋選項並清除快取狀態。）
     pub fn options_mut(&mut self) -> &mut SearchOptions {
         self.matches.clear();
         self.current = None;
@@ -43,6 +47,7 @@ impl SearchSession {
     }
 
     /// Recomputes matches against the given document contents using the current options.
+    /// （依目前選項重新計算文件內的符合結果。）
     pub fn refresh(&mut self, document: &Document) -> Result<(), SearchError> {
         let engine = SearchEngine::new(document.contents());
         self.matches = engine.find_all(&self.options)?;
@@ -52,21 +57,25 @@ impl SearchSession {
     }
 
     /// Returns all cached matches (refresh must be called beforehand).
+    /// （回傳快取的所有符合結果；需先呼叫 `refresh`。）
     pub fn matches(&self) -> &[SearchMatch] {
         &self.matches
     }
 
     /// Indicates whether cached results are empty.
+    /// （判斷目前是否沒有快取結果。）
     pub fn is_empty(&self) -> bool {
         self.matches.is_empty()
     }
 
     /// Selects the next match, respecting wrap-around rules.
+    /// （依循循環規則選取下一筆符合結果。）
     pub fn find_next(&mut self) -> Option<&SearchMatch> {
         self.advance(SearchDirection::Forward)
     }
 
     /// Selects the previous match, respecting wrap-around rules.
+    /// （依循循環規則選取上一筆符合結果。）
     pub fn find_previous(&mut self) -> Option<&SearchMatch> {
         self.advance(SearchDirection::Backward)
     }
@@ -114,12 +123,15 @@ impl SearchSession {
     }
 
     /// Returns the currently selected match.
+    /// （回傳目前選取的符合結果。）
     pub fn current(&self) -> Option<&SearchMatch> {
         self.current.and_then(|idx| self.matches.get(idx))
     }
 
     /// Replaces the currently selected match (if any) with the provided text.
+    /// （以指定文字取代當前選取的結果（若存在）。）
     /// Returns the original match that was replaced.
+    /// （回傳被取代的原始結果。）
     pub fn replace_current(
         &mut self,
         replacement: &str,
@@ -149,6 +161,7 @@ impl SearchSession {
     }
 
     /// Replaces every match within the current scope, returning the number of replacements performed.
+    /// （取代目前範圍內的所有結果，並回傳替換次數。）
     pub fn replace_all(
         &mut self,
         replacement: &str,
@@ -168,6 +181,7 @@ impl SearchSession {
     }
 
     /// Marks the currently selected match by recording its line in the provided [`BookmarkManager`].
+    /// （在給定的 [`BookmarkManager`] 中記錄目前結果所在行。）
     pub fn mark_current(&mut self, bookmarks: &mut BookmarkManager) -> Option<usize> {
         let idx = self.current?;
         let match_ref = self.matches.get_mut(idx)?;
@@ -179,6 +193,7 @@ impl SearchSession {
     }
 
     /// Marks every cached match, returning the number of newly marked lines.
+    /// （標記所有快取結果並回傳新增的行數。）
     pub fn mark_all(&mut self, bookmarks: &mut BookmarkManager) -> usize {
         let mut count = 0usize;
         for entry in &mut self.matches {
@@ -192,6 +207,7 @@ impl SearchSession {
     }
 
     /// Clears all marks previously applied via this session, restoring the bookmark manager.
+    /// （清除此會話加上的所有標記，還原書籤管理器。）
     pub fn clear_marks(&mut self, bookmarks: &mut BookmarkManager) {
         for line in self.marked_lines.iter().copied() {
             bookmarks.remove(line);
@@ -203,6 +219,7 @@ impl SearchSession {
     }
 
     /// Produces a [`SearchReport`] for the currently cached matches, tagging them with the provided path.
+    /// （針對目前快取結果產生 [`SearchReport`]，並附上對應路徑。）
     pub fn report(&self, path: Option<PathBuf>) -> SearchReport {
         if self.matches.is_empty() {
             return SearchReport::default();
@@ -211,11 +228,13 @@ impl SearchSession {
     }
 
     /// Applies a follow-up query against the cached matches (search-in-results).
+    /// （針對快取結果執行次級查詢，實現「結果再搜尋」。）
     pub fn search_in_results(&self, options: &SearchOptions) -> Result<SearchReport, SearchError> {
         self.report(None).search_in_results(options)
     }
 
     /// Restricts the session to a selection range.
+    /// （將會話限制在選取範圍內。）
     pub fn set_selection_scope(&mut self, start: usize, end: usize) {
         self.options.scope = if start == end {
             SearchScope::EntireDocument
@@ -248,11 +267,13 @@ mod tests {
         let second = session.find_next().unwrap();
         assert_eq!(second.column, 18);
 
-        // Wrap-around to first hit.
+        // Wrap-around to the first hit to respect cyclic navigation.
+        // 為符合循環導覽，需回繞至第一筆符合項。
         let third = session.find_next().unwrap();
         assert_eq!(third.column, 7);
 
-        // Backwards wrap to last hit.
+        // Wrap backwards to the final hit for reverse navigation.
+        // 反向搜尋時需回繞至最後一筆符合項。
         let prev = session.find_previous().unwrap();
         assert_eq!(prev.column, 18);
     }
@@ -271,7 +292,8 @@ mod tests {
         assert_eq!(replaced.matched, "foo");
         assert_eq!(doc.contents(), "baz bar foo");
 
-        // The next match should now point at the second occurrence.
+        // The next lookup should now reference the second occurrence.
+        // 下一次搜尋結果應對應第二個出現位置。
         let next = session.find_next().unwrap();
         assert_eq!(next.column, 9);
     }
@@ -297,7 +319,9 @@ mod tests {
         let mut bookmarks = BookmarkManager::default();
 
         let marked = session.mark_all(&mut bookmarks);
-        assert_eq!(marked, 1); // multiple hits on same line collapse to a single bookmark
+        // Multiple hits on the same line collapse into one bookmark.
+        // 同一行多次出現僅會計算一次書籤。
+        assert_eq!(marked, 1);
         assert!(bookmarks.is_bookmarked(1));
 
         session.clear_marks(&mut bookmarks);

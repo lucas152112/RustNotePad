@@ -5,6 +5,9 @@
 //! forward/backward traversal. Replace helpers expose the edits required to
 //! update the underlying buffers, while `SearchReport` aggregates results for
 //! UI consumption (result panels, bookmarks, search-in-results).
+//! 本模組支援單檔、選取範圍與多檔搜尋流程，涵蓋正則、全字匹配、區分大小寫與往返搜尋。
+//! 提供的取代工具可直接產生更新緩衝區所需的編輯操作，`SearchReport`
+//! 則彙整結果供 UI 使用（結果面板、書籤、結果再搜尋等）。
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -14,6 +17,7 @@ use regex::{Regex, RegexBuilder};
 use thiserror::Error;
 
 /// Error conditions raised by the search engine.
+/// （搜尋引擎可能遇到的錯誤情況。）
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SearchError {
     #[error("search pattern cannot be empty")]
@@ -23,6 +27,7 @@ pub enum SearchError {
 }
 
 /// Determines how the search pattern is interpreted.
+/// （決定搜尋樣式的解析方式。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SearchMode {
     Plain,
@@ -30,6 +35,7 @@ pub enum SearchMode {
 }
 
 /// Direction for iterative searches (`Find Next` / `Find Previous`).
+/// （設定逐筆搜尋時的方向，例如下一筆或上一筆。）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchDirection {
     Forward,
@@ -43,6 +49,7 @@ impl Default for SearchDirection {
 }
 
 /// Search target scope within a document.
+/// （定義搜尋作用的文件範圍。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SearchScope {
     EntireDocument,
@@ -72,6 +79,7 @@ impl SearchScope {
 }
 
 /// Options supplied to the search engine.
+/// （提供給搜尋引擎的選項集合。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchOptions {
     pub pattern: String,
@@ -86,6 +94,7 @@ pub struct SearchOptions {
 
 impl SearchOptions {
     /// Creates a new option set for the specified pattern with sensible defaults.
+    /// （使用預設值為指定樣式建立搜尋選項。）
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -108,6 +117,7 @@ impl SearchOptions {
 }
 
 /// Represents a single match produced by a search query.
+/// （描述搜尋查詢所找到的單一結果。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchMatch {
     pub start: usize,
@@ -121,17 +131,20 @@ pub struct SearchMatch {
 
 impl SearchMatch {
     /// Marks the match, typically used when user toggles bookmarks from the search panel.
+    /// （標記此結果，供搜尋面板切換書籤時使用。）
     pub fn mark(&mut self) {
         self.is_marked = true;
     }
 
     /// Clears the mark on the match.
+    /// （清除此結果的標記狀態。）
     pub fn clear_mark(&mut self) {
         self.is_marked = false;
     }
 }
 
 /// Aggregated search results for a file or document.
+/// （彙整某檔案或文件內的搜尋結果。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileSearchResult {
     pub path: Option<PathBuf>,
@@ -149,6 +162,7 @@ impl FileSearchResult {
 }
 
 /// Summary of search results, used for UI counters.
+/// （搜尋結果統計摘要，供 UI 顯示計數。）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchSummary {
     pub total_matches: usize,
@@ -156,6 +170,7 @@ pub struct SearchSummary {
 }
 
 /// Result set for batch searches.
+/// （批次搜尋的結果集合。）
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchReport {
     pub results: Vec<FileSearchResult>,
@@ -176,6 +191,7 @@ impl SearchReport {
     }
 
     /// Returns a compact summary with aggregate statistics.
+    /// （回傳彙總統計的精簡摘要。）
     pub fn summary(&self) -> SearchSummary {
         let files_with_matches = self
             .results
@@ -189,6 +205,7 @@ impl SearchReport {
     }
 
     /// Marks every match satisfying the predicate, returning the number of matches affected.
+    /// （標記所有符合條件的結果並回傳受影響的筆數。）
     pub fn mark_where<F>(&mut self, mut predicate: F) -> usize
     where
         F: FnMut(&SearchMatch) -> bool,
@@ -206,7 +223,9 @@ impl SearchReport {
     }
 
     /// Filters the result set by applying a secondary search against each match's line text.
+    /// （針對每個結果所在行再次搜尋，濾出符合者。）
     /// This implements the "search in results" workflow.
+    /// （對應「在結果中搜尋」的流程。）
     pub fn search_in_results(&self, options: &SearchOptions) -> Result<SearchReport, SearchError> {
         options.validate()?;
         let mut filtered_entries = Vec::new();
@@ -230,6 +249,7 @@ impl SearchReport {
 }
 
 /// Captures the outcome of a `replace_all` call.
+/// （記錄 `replace_all` 操作的結果狀態。）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplaceAllOutcome {
     pub replaced_text: String,
@@ -238,6 +258,7 @@ pub struct ReplaceAllOutcome {
 }
 
 /// Represents a batch search input (e.g., when scanning a workspace).
+/// （描述批次搜尋的輸入，例如掃描整個工作區。）
 #[derive(Clone, Debug)]
 pub struct FileSearchInput<'a> {
     pub path: PathBuf,
@@ -254,6 +275,7 @@ impl<'a> FileSearchInput<'a> {
 }
 
 /// Search engine bound to a particular text buffer.
+/// （綁定特定文字緩衝的搜尋引擎。）
 pub struct SearchEngine<'a> {
     text: &'a str,
     line_index: LineIndex<'a>,
@@ -268,6 +290,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     /// Finds the next match according to the search options, starting from the given byte index.
+    /// （依搜尋選項自指定位元組索引往後尋找下一筆結果。）
     pub fn find(
         &self,
         start_pos: usize,
@@ -342,6 +365,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     /// Returns all matches that satisfy the given options within the configured scope.
+    /// （回傳符合條件且位於指定範圍內的所有結果。）
     pub fn find_all(&self, options: &SearchOptions) -> Result<Vec<SearchMatch>, SearchError> {
         options.validate()?;
         let regex = build_regex(options)?;
@@ -362,6 +386,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     /// Produces a report for the current document, omitting empty results.
+    /// （產生目前文件的結果報告，略過空結果。）
     pub fn report(&self, options: &SearchOptions) -> Result<SearchReport, SearchError> {
         let matches = self.find_all(options)?;
         if matches.is_empty() {
@@ -373,6 +398,7 @@ impl<'a> SearchEngine<'a> {
     }
 
     /// Applies `replace_all` within the given scope and returns the updated text along with match metadata.
+    /// （在指定範圍內執行 `replace_all`，並回傳更新後文字與結果資訊。）
     pub fn replace_all(
         &self,
         replacement: &str,
@@ -505,6 +531,7 @@ impl<'a> SearchEngine<'a> {
 }
 
 /// Executes a search over many files, producing a summarised report.
+/// （在多個檔案進行搜尋並生成摘要報告。）
 pub fn search_in_files<'a, I>(
     inputs: I,
     options: &SearchOptions,

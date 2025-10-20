@@ -94,12 +94,16 @@ mod tests {
         recent.add("a.txt");
         recent.add("b.txt");
         recent.add("c.txt");
-        recent.add("b.txt"); // promote
+        // Re-adding an existing path should promote it to the front.
+        // 重新加入既有路徑時，應提升至清單前端。
+        recent.add("b.txt");
 
         let collected: Vec<_> = recent.iter().map(|p| p.to_str().unwrap()).collect();
         assert_eq!(collected, vec!["b.txt", "c.txt", "a.txt"]);
 
-        recent.add("d.txt"); // exceeds capacity
+        // Adding beyond capacity should evict the oldest entry.
+        // 超出容量時應移除最舊的紀錄。
+        recent.add("d.txt");
         let collected: Vec<_> = recent.iter().map(|p| p.to_str().unwrap()).collect();
         assert_eq!(collected, vec!["d.txt", "b.txt", "c.txt"]);
     }

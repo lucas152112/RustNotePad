@@ -5,21 +5,25 @@ use rustnotepad_settings::{LayoutConfig, PaneRole, ThemeDefinition, ThemeManager
 fn layout_and_theme_regression() {
     let layout = LayoutConfig::default();
 
-    // Primary pane should預設聚焦 search.rs
+    // Primary pane should focus on search.rs by default.
+    // 主窗格預設應聚焦於 search.rs。
     let active_primary = layout.active_tab(PaneRole::Primary).expect("primary tab");
     assert_eq!(active_primary.title, "search.rs");
     assert!(active_primary.color.is_some());
 
-    // Secondary pane keeps docs design.md active
+    // Secondary pane keeps docs/design.md active as the preview tab.
+    // 次窗格維持 docs/design.md 為預覽分頁。
     let active_secondary = layout
         .active_tab(PaneRole::Secondary)
         .expect("secondary tab");
     assert_eq!(active_secondary.title, "design.md");
 
-    // Pinned tabs跨 pane 合計至少兩個
+    // Pinned tabs across both panes should total at least two.
+    // 兩個窗格的釘選分頁總數應至少為兩個。
     assert!(layout.pinned_tabs().len() >= 2);
 
-    // Theme manager toggling retains names
+    // Theme manager toggling should preserve the display names.
+    // 主題管理器切換後應保留顯示名稱。
     let mut manager = ThemeManager::new(vec![
         ThemeDefinition::builtin_dark(),
         ThemeDefinition::builtin_light(),

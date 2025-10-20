@@ -108,10 +108,7 @@ mod tests {
         assert!(!tree.is_line_visible(3));
         assert!(tree.is_line_visible(2));
         assert!(tree.is_line_visible(6));
-        assert_eq!(
-            tree.visible_lines(8),
-            vec![0, 1, 2, 6, 7]
-        );
+        assert_eq!(tree.visible_lines(8), vec![0, 1, 2, 6, 7]);
     }
 
     #[test]
@@ -119,7 +116,8 @@ mod tests {
         let mut tree = FoldTree::default();
         assert!(tree.define_region(1, 4).is_some());
         assert!(tree.define_region(4, 6).is_some());
-        // partial overlap without nesting should fail
+        // Partial overlaps without proper nesting must be rejected.
+        // 若未形成巢狀卻部分重疊，應視為無效定義。
         assert!(tree.define_region(2, 5).is_none());
     }
 }

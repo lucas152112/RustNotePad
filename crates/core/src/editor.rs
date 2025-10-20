@@ -442,7 +442,8 @@ mod tests {
         assert_eq!(buffer.carets()[0].position(), 3);
         assert_eq!(buffer.carets()[1].position(), "RNP\nbetaRNP".len());
 
-        // verify setting carets succeeds
+        // Verify that replacing the caret set succeeds.
+        // 確認重新設定游標集合可順利套用。
         let mut buffer = EditorBuffer::new("abc");
         buffer
             .set_carets(vec![Caret::new(0), Caret::new(2)])
