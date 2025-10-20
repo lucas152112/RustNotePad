@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
-const SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview
+const SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview / RustNotePad 介面預覽
 fn main() {
     let mut search_engine = SearchEngine::new("alpha beta gamma");
     let options = SearchOptions::new("beta");
@@ -977,6 +977,7 @@ fn color32_from_color(color: Color) -> Color32 {
 
 fn parse_tag_color(tag: TabColorTag) -> Color {
     // Tag hex strings are trusted constants; unwrap is safe.
+    // 標籤色碼為可信常數，unwrap 可安全使用。
     Color::from_hex(tag.hex()).expect("valid color tag")
 }
 
