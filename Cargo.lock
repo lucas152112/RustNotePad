@@ -2607,6 +2607,9 @@ dependencies = [
  "eframe",
  "egui",
  "once_cell",
+ "rustnotepad_autocomplete",
+ "rustnotepad_function_list",
+ "rustnotepad_highlight",
  "rustnotepad_settings",
 ]
 

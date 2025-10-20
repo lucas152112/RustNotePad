@@ -4,12 +4,21 @@ use egui::{
     TextStyle,
 };
 use once_cell::sync::Lazy;
+use rustnotepad_autocomplete::{
+    CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
+};
+use rustnotepad_function_list::{
+    FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange,
+};
+use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_settings::{
     Color, LayoutConfig, PaneLayout, PaneRole, ResolvedPalette, TabColorTag, TabView,
     ThemeDefinition, ThemeKind, ThemeManager,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview
@@ -21,6 +30,9 @@ fn main() {
     }
 }
 "#;
+
+const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
+const PREVIEW_LANGUAGE_ID: &str = "rust";
 
 #[derive(Clone, Copy)]
 struct MenuSection {
@@ -246,6 +258,12 @@ struct RustNotePadApp {
     pending_theme_refresh: bool,
     fonts_installed: bool,
     font_warning: Option<String>,
+    highlight_registry: LanguageRegistry,
+    function_registry: ParserRegistry,
+    document_index: Arc<DocumentIndex>,
+    autocomplete_engine: CompletionEngine,
+    completion_prefix: String,
+    completion_results: Vec<CompletionItem>,
 }
 
 impl Default for RustNotePadApp {
@@ -280,6 +298,20 @@ impl Default for RustNotePadApp {
             locales[selected_locale],
         );
 
+        let highlight_registry = LanguageRegistry::with_defaults();
+        let function_registry = build_function_registry();
+        let document_index = Arc::new(DocumentIndex::new());
+        document_index.update_document(PREVIEW_DOCUMENT_ID, SAMPLE_EDITOR_CONTENT);
+        let mut autocomplete_engine = CompletionEngine::new();
+        autocomplete_engine.register_provider(
+            "document_words",
+            5,
+            DocumentWordsProvider::new(document_index.clone())
+                .with_prefix_minimum(1)
+                .with_max_items(40),
+        );
+        let completion_prefix = "ma".to_string();
+
         let mut app = Self {
             layout,
             editor_preview: SAMPLE_EDITOR_CONTENT.to_string(),
@@ -292,10 +324,45 @@ impl Default for RustNotePadApp {
             pending_theme_refresh: true,
             fonts_installed: false,
             font_warning: None,
+            highlight_registry,
+            function_registry,
+            document_index,
+            autocomplete_engine,
+            completion_prefix,
+            completion_results: Vec::new(),
         };
         app.status.refresh_cursor(&app.editor_preview);
+        app.refresh_completions();
         app
     }
+}
+
+fn build_function_registry() -> ParserRegistry {
+    let mut registry = ParserRegistry::new();
+    let rust_rules = vec![
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Function,
+        )
+        .expect("rust function rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?struct\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Struct,
+        )
+        .expect("rust struct rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?enum\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Enum,
+        )
+        .expect("rust enum rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?impl(?:<[^>]+>)?\s+(?P<name>[A-Za-z_][A-Za-z0-9_:<>]*)",
+            FunctionKind::Region,
+        )
+        .expect("rust impl rule"),
+    ];
+    registry.register_parser(PREVIEW_LANGUAGE_ID, Box::new(RegexParser::new(rust_rules)));
+    registry
 }
 
 impl RustNotePadApp {
@@ -304,6 +371,16 @@ impl RustNotePadApp {
             self.apply_active_theme(ctx);
             self.pending_theme_refresh = false;
         }
+    }
+
+    fn refresh_completions(&mut self) {
+        let request = CompletionRequest::new(
+            Some(PREVIEW_DOCUMENT_ID.to_string()),
+            self.completion_prefix.clone(),
+        )
+        .with_max_items(16);
+        let result = self.autocomplete_engine.request(request);
+        self.completion_results = result.items;
     }
 
     fn apply_active_theme(&mut self, ctx: &egui::Context) {
@@ -656,7 +733,14 @@ impl RustNotePadApp {
                                         if response.changed() {
                                             self.editor_preview = buffer;
                                             self.status.refresh_cursor(&self.editor_preview);
+                                            self.document_index.update_document(
+                                                PREVIEW_DOCUMENT_ID,
+                                                &self.editor_preview,
+                                            );
+                                            self.refresh_completions();
                                         }
+
+                                        self.render_editor_insights(ui);
                                     });
                             },
                         );
@@ -684,6 +768,117 @@ impl RustNotePadApp {
                 },
             );
         });
+    }
+
+    fn render_editor_insights(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(RichText::new("Editor Insights / 編輯器分析").strong());
+        ui.add_space(6.0);
+        ui.columns(3, |columns| {
+            self.render_highlight_summary(&mut columns[0]);
+            self.render_function_list_panel(&mut columns[1]);
+            self.render_completion_panel(&mut columns[2]);
+        });
+    }
+
+    fn render_highlight_summary(&self, ui: &mut egui::Ui) {
+        ui.heading("Syntax Highlight / 語法高亮摘要");
+        match self
+            .highlight_registry
+            .highlight(PREVIEW_LANGUAGE_ID, &self.editor_preview)
+        {
+            Ok(tokens) => {
+                ui.label(format!("Tokens: {}", tokens.len()));
+                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                for token in &tokens {
+                    *counts.entry(format!("{:?}", token.kind)).or_insert(0) += 1;
+                }
+                for (kind, count) in counts.iter() {
+                    ui.label(format!("{kind}: {count}"));
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new("Sample / 範例").italics());
+                for token in tokens.iter().take(6) {
+                    if let Some(snippet) = self.editor_preview.get(token.range.clone()) {
+                        let snippet = snippet.replace('\n', " ");
+                        if snippet.trim().is_empty() {
+                            continue;
+                        }
+                        let preview = truncate_snippet(&snippet, 32);
+                        ui.label(format!("{:?}: {}", token.kind, preview));
+                    }
+                }
+                if tokens.len() > 6 {
+                    ui.label("…");
+                }
+            }
+            Err(err) => {
+                ui.colored_label(
+                    Color32::from_rgb(239, 68, 68),
+                    format!("Highlight error: {err}"),
+                );
+            }
+        }
+    }
+
+    fn render_function_list_panel(&self, ui: &mut egui::Ui) {
+        ui.heading("Function List / 函式清單");
+        match self
+            .function_registry
+            .parse(PREVIEW_LANGUAGE_ID, &self.editor_preview)
+        {
+            Some(entries) if !entries.is_empty() => {
+                for entry in entries.iter().take(10) {
+                    let line = line_number_for_range(&self.editor_preview, &entry.range);
+                    ui.label(format!("{:?} {} (Ln {line})", entry.kind, entry.name));
+                }
+                if entries.len() > 10 {
+                    let remaining = entries.len() - 10;
+                    ui.label(format!(
+                        "… {remaining} additional symbols / 另有 {remaining} 個符號"
+                    ));
+                }
+            }
+            _ => {
+                ui.label("No symbols detected. / 尚未偵測到任何符號。");
+            }
+        }
+    }
+
+    fn render_completion_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Autocomplete / 自動完成");
+        let mut prefix = self.completion_prefix.clone();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut prefix)
+                .hint_text("Prefix / 前綴")
+                .desired_width(f32::INFINITY),
+        );
+        if response.changed() {
+            self.completion_prefix = prefix;
+            self.refresh_completions();
+        }
+
+        if self.completion_results.is_empty() {
+            ui.label("No suggestions available. / 目前沒有建議。");
+        } else {
+            for item in self.completion_results.iter().take(10) {
+                let kind = format!("{:?}", item.kind);
+                let detail = item.detail.as_deref().unwrap_or("");
+                if detail.is_empty() {
+                    ui.label(format!("{kind} — {}", item.label));
+                } else {
+                    ui.label(format!("{kind} — {} ({detail})", item.label));
+                }
+            }
+            if self.completion_results.len() > 10 {
+                let remaining = self.completion_results.len() - 10;
+                ui.label(format!(
+                    "… {remaining} more suggestions / 另有 {remaining} 筆建議"
+                ));
+            }
+        }
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
@@ -788,6 +983,21 @@ fn parse_tag_color(tag: TabColorTag) -> Color {
 fn draw_color_badge(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
+}
+
+fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
+    let trimmed = snippet.trim();
+    if trimmed.chars().count() <= max_chars {
+        trimmed.to_string()
+    } else {
+        let prefix: String = trimmed.chars().take(max_chars).collect();
+        format!("{prefix}…")
+    }
+}
+
+fn line_number_for_range(text: &str, range: &TextRange) -> usize {
+    let start = range.start.min(text.len());
+    text[..start].lines().count().saturating_add(1)
 }
 
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {

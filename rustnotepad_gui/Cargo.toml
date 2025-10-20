@@ -8,6 +8,9 @@ eframe = { workspace = true }
 egui = { workspace = true }
 once_cell = { workspace = true }
 rustnotepad_settings = { path = "../crates/settings" }
+rustnotepad_autocomplete = { path = "../crates/autocomplete" }
+rustnotepad_function_list = { path = "../crates/function_list" }
+rustnotepad_highlight = { path = "../crates/highlight" }
 
 [[bin]]
 name = "rustnotepad"
