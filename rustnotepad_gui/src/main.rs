@@ -7,9 +7,7 @@ use once_cell::sync::Lazy;
 use rustnotepad_autocomplete::{
     CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
 };
-use rustnotepad_function_list::{
-    FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange,
-};
+use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange};
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_settings::{
     Color, LayoutConfig, PaneLayout, PaneRole, ResolvedPalette, TabColorTag, TabView,
@@ -553,16 +551,24 @@ impl RustNotePadApp {
             });
     }
 
-    fn show_left_sidebar(&self, ctx: &egui::Context) {
+    fn show_left_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("project_panel")
             .default_width(220.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Project Panel");
-                ui.separator();
-                for node in PROJECT_TREE.iter() {
-                    self.render_project_node(ui, node, 0);
-                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Project Panel / 專案面板");
+                    ui.separator();
+                    for node in PROJECT_TREE.iter() {
+                        self.render_project_node(ui, node, 0);
+                    }
+                    ui.add_space(10.0);
+                    ui.separator();
+                    self.render_function_list_panel(ui);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    self.render_completion_panel(ui);
+                });
             });
     }
 
