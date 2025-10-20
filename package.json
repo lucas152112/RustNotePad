@@ -1,0 +1,31 @@
+{
+  "name": "rustnotepad",
+  "version": "1.0.0",
+  "description": "Because Notepad++ is Windows-only, RustNotePad reimplements it in Rust so Linux and other platforms can work seamlessly with Traditional Chinese content.   由於 Notepad++ 僅提供 Windows 版本，RustNotePad 以 Rust 重新實作，讓 Linux 等平台也能順暢處理正體中文內容。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucas152112/RustNotePad.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/lucas152112/RustNotePad/issues"
+  },
+  "homepage": "https://github.com/lucas152112/RustNotePad#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.8.1",
+    "@wdio/cli": "^9.20.0",
+    "@wdio/local-runner": "^9.20.0",
+    "@wdio/mocha-framework": "^9.20.0",
+    "@wdio/spec-reporter": "^9.20.0",
+    "webdriverio": "^9.20.0"
+  }
+}
