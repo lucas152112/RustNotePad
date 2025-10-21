@@ -6,41 +6,37 @@ use egui::{
 use once_cell::sync::Lazy;
 use rustnotepad_autocomplete::{
     CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
+    LanguageDictionaryProvider, LspProvider, Snippet, SnippetProvider,
 };
 use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange};
 use rustnotepad_highlight::LanguageRegistry;
+use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
 use rustnotepad_settings::{
-    Color, LayoutConfig, PaneLayout, PaneRole, ResolvedPalette, TabColorTag, TabView,
-    ThemeDefinition, ThemeKind, ThemeManager,
+    Color, LayoutConfig, LocaleSummary, LocalizationManager, PaneLayout, PaneRole, ResolvedPalette,
+    SnippetStore, TabColorTag, TabView, ThemeDefinition, ThemeKind, ThemeManager,
 };
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
-const SAMPLE_EDITOR_CONTENT: &str = r#"// RustNotePad UI Preview / RustNotePad 介面預覽
-fn main() {
-    let mut search_engine = SearchEngine::new("alpha beta gamma");
-    let options = SearchOptions::new("beta");
-    if let Some(hit) = search_engine.find(0, &options).expect("search") {
-        println!("Found match at byte {}", hit.start);
-    }
-}
-"#;
-
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
 const PREVIEW_LANGUAGE_ID: &str = "rust";
 
 #[derive(Clone, Copy)]
 struct MenuSection {
-    title: &'static str,
-    items: &'static [&'static str],
+    title_key: &'static str,
+    item_keys: &'static [&'static str],
 }
 
 impl MenuSection {
-    const fn new(title: &'static str, items: &'static [&'static str]) -> Self {
-        Self { title, items }
+    const fn new(title_key: &'static str, item_keys: &'static [&'static str]) -> Self {
+        Self {
+            title_key,
+            item_keys,
+        }
     }
 }
 
@@ -76,69 +72,97 @@ impl ProjectNode {
 static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
     vec![
         MenuSection::new(
-            "File",
+            "menu.file",
             &[
-                "New",
-                "Open...",
-                "Save",
-                "Save As...",
-                "Save All",
-                "Close",
-                "Close All",
-                "Exit",
+                "menu.file.new",
+                "menu.file.open",
+                "menu.file.save",
+                "menu.file.save_as",
+                "menu.file.save_all",
+                "menu.file.close",
+                "menu.file.close_all",
+                "menu.file.exit",
             ],
         ),
         MenuSection::new(
-            "Edit",
+            "menu.edit",
             &[
-                "Undo",
-                "Redo",
-                "Cut",
-                "Copy",
-                "Paste",
-                "Delete",
-                "Select All",
-                "Column Editor...",
+                "menu.edit.undo",
+                "menu.edit.redo",
+                "menu.edit.cut",
+                "menu.edit.copy",
+                "menu.edit.paste",
+                "menu.edit.delete",
+                "menu.edit.select_all",
+                "menu.edit.column_editor",
             ],
         ),
         MenuSection::new(
-            "Search",
+            "menu.search",
             &[
-                "Find...",
-                "Find Next",
-                "Find Previous",
-                "Replace...",
-                "Find in Files...",
-                "Bookmark ▸",
+                "menu.search.find",
+                "menu.search.find_next",
+                "menu.search.find_previous",
+                "menu.search.replace",
+                "menu.search.find_in_files",
+                "menu.search.bookmark",
             ],
         ),
         MenuSection::new(
-            "View",
+            "menu.view",
             &[
-                "Toggle Full Screen",
-                "Restore Default Zoom",
-                "Document Map",
-                "Function List",
-                "Project Panel ▸",
+                "menu.view.toggle_fullscreen",
+                "menu.view.restore_zoom",
+                "menu.view.document_map",
+                "menu.view.function_list",
+                "menu.view.project_panel",
             ],
         ),
         MenuSection::new(
-            "Settings",
+            "menu.settings",
             &[
-                "Preferences...",
-                "Style Configurator...",
-                "Shortcut Mapper...",
-                "Edit Popup Context Menu...",
+                "menu.settings.preferences",
+                "menu.settings.style_configurator",
+                "menu.settings.shortcut_mapper",
+                "menu.settings.edit_popup_menu",
             ],
         ),
-        MenuSection::new("Macro", &["Start Recording", "Stop Recording", "Playback"]),
-        MenuSection::new("Run", &["Run...", "Launch in Chrome", "Launch in Firefox"]),
-        MenuSection::new("Plugins", &["Plugins Admin...", "Open Plugins Folder..."]),
         MenuSection::new(
-            "Window",
-            &["Duplicate", "Clone to Other View", "Move to Other View"],
+            "menu.macro",
+            &[
+                "menu.macro.start_recording",
+                "menu.macro.stop_recording",
+                "menu.macro.playback",
+            ],
         ),
-        MenuSection::new("Help", &["User Manual", "Debug Info", "About"]),
+        MenuSection::new(
+            "menu.run",
+            &[
+                "menu.run.run",
+                "menu.run.launch_chrome",
+                "menu.run.launch_firefox",
+            ],
+        ),
+        MenuSection::new(
+            "menu.plugins",
+            &["menu.plugins.admin", "menu.plugins.open_folder"],
+        ),
+        MenuSection::new(
+            "menu.window",
+            &[
+                "menu.window.duplicate",
+                "menu.window.clone_other_view",
+                "menu.window.move_other_view",
+            ],
+        ),
+        MenuSection::new(
+            "menu.help",
+            &[
+                "menu.help.user_manual",
+                "menu.help.debug_info",
+                "menu.help.about",
+            ],
+        ),
     ]
 });
 
@@ -239,14 +263,23 @@ impl StatusBarState {
     fn set_theme(&mut self, theme_name: &str) {
         self.theme = theme_name.to_string();
     }
+
+    fn set_locale(&mut self, locale: &str) {
+        self.ui_language = locale.to_string();
+    }
+
+    fn set_document_language(&mut self, language: String) {
+        self.document_language = language;
+    }
 }
 
 struct RustNotePadApp {
     layout: LayoutConfig,
     editor_preview: String,
     bottom_tab_index: usize,
-    available_locales: Vec<&'static str>,
     selected_locale: usize,
+    localization: LocalizationManager,
+    sample_editor_content: String,
     theme_manager: ThemeManager,
     palette: ResolvedPalette,
     status: StatusBarState,
@@ -256,6 +289,7 @@ struct RustNotePadApp {
     highlight_registry: LanguageRegistry,
     function_registry: ParserRegistry,
     document_index: Arc<DocumentIndex>,
+    lsp_client: Arc<LspClient>,
     autocomplete_engine: CompletionEngine,
     completion_prefix: String,
     completion_results: Vec<CompletionItem>,
@@ -265,6 +299,16 @@ struct RustNotePadApp {
 
 impl Default for RustNotePadApp {
     fn default() -> Self {
+        let localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
+            .unwrap_or_else(|_| LocalizationManager::fallback());
+        let locale_summaries = localization.locale_summaries();
+        let selected_locale = localization.active_index();
+        let locale_display = locale_summaries
+            .get(selected_locale)
+            .map(|summary| summary.display_name.clone())
+            .unwrap_or_else(|| "English (en-US)".to_string());
+        let sample_editor_content = localization.text("sample.editor_preview").into_owned();
+
         let theme_manager = ThemeManager::load_from_dir("assets/themes").unwrap_or_else(|_| {
             ThemeManager::new(vec![
                 ThemeDefinition::builtin_dark(),
@@ -274,8 +318,6 @@ impl Default for RustNotePadApp {
         });
         let palette = theme_manager.active_palette().clone();
         let layout = LayoutConfig::default();
-        let locales = vec!["English (en-US)"];
-        let selected_locale = 0usize;
         let active_panel_index = layout
             .bottom_dock
             .active_panel
@@ -289,32 +331,81 @@ impl Default for RustNotePadApp {
             })
             .unwrap_or(0);
 
-        let status = StatusBarState::new(
-            &layout,
-            &theme_manager.active_theme().name,
-            locales[selected_locale],
-        );
+        let mut status =
+            StatusBarState::new(&layout, &theme_manager.active_theme().name, &locale_display);
 
         let highlight_registry = LanguageRegistry::with_defaults();
         let function_registry = build_function_registry();
         let document_index = Arc::new(DocumentIndex::new());
-        document_index.update_document(PREVIEW_DOCUMENT_ID, SAMPLE_EDITOR_CONTENT);
+        document_index.update_document(PREVIEW_DOCUMENT_ID, &sample_editor_content);
+        let lsp_client = Arc::new(LspClient::new());
         let mut autocomplete_engine = CompletionEngine::new();
         autocomplete_engine.register_provider(
+            "lsp",
+            0,
+            LspProvider::new(lsp_client.clone()).with_max_items(24),
+        );
+
+        let snippet_store = SnippetStore::builtin();
+        let snippet_items: Vec<Snippet> = snippet_store
+            .entries()
+            .iter()
+            .map(|definition| {
+                let mut snippet = Snippet::new(definition.trigger.clone(), definition.body.clone());
+                if let Some(description) = &definition.description {
+                    snippet = snippet.with_description(description.clone());
+                }
+                if let Some(language) = &definition.language {
+                    snippet = snippet.with_language(language.clone());
+                }
+                snippet
+            })
+            .collect();
+        autocomplete_engine.register_provider(
+            "snippets",
+            2,
+            SnippetProvider::new(snippet_items).with_max_items(32),
+        );
+
+        let mut dictionary_provider = LanguageDictionaryProvider::new().with_max_items(48);
+        let mut fallback_keywords = Vec::new();
+        for language_id in ["rust", "json"] {
+            if let Some(language) = highlight_registry.get(language_id) {
+                dictionary_provider.register_language(
+                    language_id,
+                    language.keywords().to_vec(),
+                    language.case_sensitive,
+                );
+                fallback_keywords.extend(language.keywords().iter().cloned());
+            }
+        }
+        if !fallback_keywords.is_empty() {
+            dictionary_provider.register_fallback(fallback_keywords);
+        }
+        autocomplete_engine.register_provider("dictionary", 4, dictionary_provider);
+        autocomplete_engine.register_provider(
             "document_words",
-            5,
+            6,
             DocumentWordsProvider::new(document_index.clone())
                 .with_prefix_minimum(1)
                 .with_max_items(40),
         );
         let completion_prefix = "ma".to_string();
 
+        status.set_document_language(
+            localization
+                .text(language_display_key(PREVIEW_LANGUAGE_ID))
+                .into_owned(),
+        );
+        status.set_locale(&locale_display);
+
         let mut app = Self {
             layout,
-            editor_preview: SAMPLE_EDITOR_CONTENT.to_string(),
+            editor_preview: sample_editor_content.clone(),
             bottom_tab_index: active_panel_index,
-            available_locales: locales,
             selected_locale,
+            localization,
+            sample_editor_content,
             theme_manager,
             palette,
             status,
@@ -324,6 +415,7 @@ impl Default for RustNotePadApp {
             highlight_registry,
             function_registry,
             document_index,
+            lsp_client,
             autocomplete_engine,
             completion_prefix,
             completion_results: Vec::new(),
@@ -373,13 +465,62 @@ impl RustNotePadApp {
     }
 
     fn refresh_completions(&mut self) {
-        let request = CompletionRequest::new(
+        let mut request = CompletionRequest::new(
             Some(self.current_document_id.clone()),
             self.completion_prefix.clone(),
         )
-        .with_max_items(16);
+        .with_max_items(16)
+        .with_language(Some(self.current_language_id.clone()));
+        if let Some(language) = self
+            .highlight_registry
+            .get(self.current_language_id.as_str())
+        {
+            request = request.with_case_sensitive(language.case_sensitive);
+        }
         let result = self.autocomplete_engine.request(request);
         self.completion_results = result.items;
+    }
+
+    fn text<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
+        self.localization.text(key)
+    }
+
+    fn format_indexed(&self, key: &str, values: &[String]) -> String {
+        let mut text = self.text(key).into_owned();
+        for (idx, value) in values.iter().enumerate() {
+            let placeholder = format!("{{{}}}", idx);
+            text = text.replace(&placeholder, value);
+        }
+        text
+    }
+
+    fn language_display_name(&self, language_id: &str) -> String {
+        self.localization
+            .text(language_display_key(language_id))
+            .into_owned()
+    }
+
+    fn apply_locale_change(&mut self, index: usize, summaries: &[LocaleSummary]) {
+        if !self.localization.set_active_by_index(index) {
+            return;
+        }
+        self.selected_locale = index;
+        if let Some(summary) = summaries.get(index) {
+            self.status.set_locale(&summary.display_name);
+        }
+        self.sample_editor_content = self.localization.text("sample.editor_preview").into_owned();
+        if self.current_document_id == PREVIEW_DOCUMENT_ID {
+            self.editor_preview = self.sample_editor_content.clone();
+            self.document_index
+                .update_document(&self.current_document_id, &self.editor_preview);
+            self.status.refresh_cursor(&self.editor_preview);
+        }
+        if self.font_warning.is_some() {
+            self.font_warning = Some(self.text("fonts.warning.cjk_missing").into_owned());
+        }
+        self.status
+            .set_document_language(self.language_display_name(&self.current_language_id));
+        self.refresh_completions();
     }
 
     fn open_document(&mut self, path: &str, display: &str) {
@@ -392,7 +533,7 @@ impl RustNotePadApp {
             .unwrap_or(display);
         let mut tab = TabView::new(path, file_name);
         let language_id = language_id_from_path(path);
-        tab.language = Some(language_display_name(language_id).to_string());
+        tab.language = Some(self.language_display_name(language_id));
         if let Some(pane) = self
             .layout
             .panes
@@ -430,8 +571,9 @@ impl RustNotePadApp {
     }
 
     fn load_document(&mut self, path: &str, language_hint: Option<&str>) {
-        let contents = fs::read_to_string(path)
-            .unwrap_or_else(|_| format!("// Unable to open {path}\n// 無法開啟 {path}\n"));
+        let fallback_template = self.text("document.load_error").into_owned();
+        let contents =
+            fs::read_to_string(path).unwrap_or_else(|_| fallback_template.replace("{path}", path));
         self.editor_preview = contents;
         self.current_document_id = path.to_string();
         let language_id = language_hint
@@ -439,10 +581,13 @@ impl RustNotePadApp {
             .map(|id| id.to_string())
             .unwrap_or_else(|| language_id_from_path(path).to_string());
         self.current_language_id = language_id.clone();
+        self.lsp_client
+            .set_enabled(self.current_language_id.clone(), true);
         self.document_index
             .update_document(&self.current_document_id, &self.editor_preview);
         self.status.refresh_cursor(&self.editor_preview);
-        self.status.document_language = language_display_name(&language_id).to_string();
+        self.status
+            .set_document_language(self.language_display_name(&language_id));
         self.status.selection = 0;
         self.refresh_completions();
     }
@@ -475,13 +620,14 @@ impl RustNotePadApp {
             {
                 self.load_document(&active_tab.id, active_tab.language.as_deref());
             } else {
-                self.editor_preview = SAMPLE_EDITOR_CONTENT.to_string();
+                self.editor_preview = self.sample_editor_content.clone();
                 self.current_document_id = PREVIEW_DOCUMENT_ID.to_string();
                 self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
                 self.document_index
                     .update_document(&self.current_document_id, &self.editor_preview);
                 self.status.refresh_cursor(&self.editor_preview);
-                self.status.document_language = "Plain Text".into();
+                self.status
+                    .set_document_language(self.language_display_name(PREVIEW_LANGUAGE_ID));
                 self.refresh_completions();
             }
         }
@@ -554,10 +700,7 @@ impl RustNotePadApp {
                 family.push(name);
             }
         } else if self.font_warning.is_none() {
-            self.font_warning = Some(
-                "未找到系統內建的正體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援正體中文的字型後重啟 RustNotePad。"
-                    .into(),
-            );
+            self.font_warning = Some(self.text("fonts.warning.cjk_missing").into_owned());
         }
 
         ctx.set_fonts(definitions);
@@ -570,9 +713,11 @@ impl RustNotePadApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     for section in MENU_STRUCTURE.iter() {
-                        ui.menu_button(section.title, |ui| {
-                            for item in section.items {
-                                ui.add_enabled(false, egui::Button::new(*item));
+                        let title = self.text(section.title_key).into_owned();
+                        ui.menu_button(title, |ui| {
+                            for item_key in section.item_keys {
+                                let label = self.text(item_key).into_owned();
+                                ui.add_enabled(false, egui::Button::new(label));
                             }
                         });
                     }
@@ -586,7 +731,12 @@ impl RustNotePadApp {
             .exact_height(38.0)
             .show(ctx, |ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.label(RichText::new("Workspace: rustnotepad").strong());
+                    let workspace_label = format!(
+                        "{}: {}",
+                        self.text("toolbar.workspace_prefix"),
+                        "rustnotepad"
+                    );
+                    ui.label(RichText::new(workspace_label).strong());
                     ui.separator();
 
                     let theme_names: Vec<&str> = self.theme_manager.theme_names().collect();
@@ -609,20 +759,38 @@ impl RustNotePadApp {
                     }
 
                     ui.separator();
-                    ui.label(
-                        RichText::new(format!(
-                            "UI Locale / 介面語系: {}",
-                            self.available_locales[self.selected_locale]
-                        ))
-                        .italics(),
-                    );
+                    let locale_label = format!("{}:", self.text("toolbar.ui_locale"));
+                    ui.label(locale_label);
+                    let locale_summaries = self.localization.locale_summaries();
+                    let mut locale_index = self.selected_locale;
+                    let current_locale_text = locale_summaries
+                        .get(locale_index)
+                        .map(|summary| summary.display_name.clone())
+                        .unwrap_or_else(|| "English (en-US)".to_string());
+                    egui::ComboBox::from_id_source("locale_selector")
+                        .width(200.0)
+                        .selected_text(current_locale_text)
+                        .show_ui(ui, |ui| {
+                            for (idx, summary) in locale_summaries.iter().enumerate() {
+                                let selected = idx == locale_index;
+                                if ui
+                                    .selectable_label(selected, &summary.display_name)
+                                    .clicked()
+                                {
+                                    locale_index = idx;
+                                }
+                            }
+                        });
+                    if locale_index != self.selected_locale {
+                        self.apply_locale_change(locale_index, &locale_summaries);
+                    }
 
                     ui.separator();
                     let mut ratio = self.layout.split_ratio;
                     if ui
                         .add(
                             egui::Slider::new(&mut ratio, 0.3..=0.7)
-                                .prefix("Split ")
+                                .prefix(self.text("toolbar.split_prefix").to_string())
                                 .show_value(false),
                         )
                         .changed()
@@ -634,7 +802,9 @@ impl RustNotePadApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let pinned_count = self.layout.pinned_tabs().len();
-                        ui.label(format!("Pinned tabs: {pinned_count}"));
+                        ui.label(
+                            self.format_indexed("toolbar.pinned_tabs", &[pinned_count.to_string()]),
+                        );
                     });
                 });
 
@@ -655,7 +825,7 @@ impl RustNotePadApp {
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Project Panel / 專案面板");
+                    ui.heading(self.text("panel.project.title"));
                     ui.separator();
                     for node in PROJECT_TREE.iter() {
                         self.render_project_node(ui, node, 0);
@@ -678,7 +848,7 @@ impl RustNotePadApp {
             .default_width(180.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Document Map");
+                ui.heading(self.text("panel.document_map.title"));
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(ui.available_height())
@@ -695,21 +865,24 @@ impl RustNotePadApp {
             .resizable(true)
             .min_height(140.0)
             .show(ctx, |ui| {
-                let panels = &self.layout.bottom_dock.visible_panels;
-                if panels.is_empty() {
-                    ui.label("No panels configured.");
+                let panel_ids = self.layout.bottom_dock.visible_panels.clone();
+                if panel_ids.is_empty() {
+                    ui.label(self.text("panel.no_panels_configured"));
                     return;
                 }
 
                 ui.horizontal(|ui| {
-                    for (idx, panel) in panels.iter().enumerate() {
-                        let title = match panel.as_str() {
-                            "find_results" => "Find Results",
-                            "console" => "Console",
-                            "notifications" => "Notifications",
-                            "lsp" => "LSP Diagnostics",
-                            other => other,
+                    for (idx, panel) in panel_ids.iter().enumerate() {
+                        let title_key = match panel.as_str() {
+                            "find_results" => Some("panel.find_results.title"),
+                            "console" => Some("panel.console.title"),
+                            "notifications" => Some("panel.notifications.title"),
+                            "lsp" => Some("panel.lsp.title"),
+                            _ => None,
                         };
+                        let title = title_key
+                            .map(|key| self.text(key).into_owned())
+                            .unwrap_or_else(|| panel.to_string());
                         let selected = idx == self.bottom_tab_index;
                         if ui
                             .selectable_label(selected, RichText::new(title).strong())
@@ -722,7 +895,7 @@ impl RustNotePadApp {
                 });
                 ui.separator();
 
-                let active_panel = panels
+                let active_panel = panel_ids
                     .get(self.bottom_tab_index)
                     .cloned()
                     .or_else(|| self.layout.bottom_dock.active_panel.clone())
@@ -730,26 +903,54 @@ impl RustNotePadApp {
 
                 match active_panel.as_str() {
                     "find_results" => {
-                        ui.label("Find Results: 5 hits across 3 files.");
+                        ui.label(self.text("panel.find_results.summary"));
                         ui.label("search/src/lib.rs:42  let matches = engine.find_all(&options)?;");
                         ui.label(
                             "core/src/search_session.rs:155  document.set_contents(replaced_text);",
                         );
                     }
                     "console" => {
-                        ui.label("cargo check --workspace");
-                        ui.label("Finished dev [unoptimized + debuginfo] target(s) in 2.34s");
+                        ui.label(self.text("panel.console.command"));
+                        ui.label(self.text("panel.console.finished"));
                     }
                     "notifications" => {
-                        ui.label("✔ All background tasks are idle.");
-                        ui.label("⚠ Theme 'Nordic Daylight' missing custom font, using fallback.");
+                        ui.label(self.text("panel.notifications.idle"));
+                        ui.label(self.text("panel.notifications.font_warning"));
                     }
                     "lsp" => {
-                        ui.label("rust-analyzer connected");
-                        ui.label("Diagnostics: none.");
+                        if self.lsp_client.is_online() {
+                            ui.label(self.text("panel.lsp.connected"));
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(239, 68, 68),
+                                self.text("panel.lsp.offline").to_string(),
+                            );
+                        }
+                        let diagnostics = self
+                            .lsp_client
+                            .diagnostics(self.current_language_id.as_str());
+                        if diagnostics.is_empty() {
+                            ui.label(self.text("panel.lsp.no_diagnostics"));
+                        } else {
+                            for diagnostic in diagnostics.iter().take(5) {
+                                let color = diagnostic_color(diagnostic.severity);
+                                ui.colored_label(
+                                    color,
+                                    format!("[{:?}] {}", diagnostic.severity, diagnostic.message),
+                                );
+                            }
+                            if diagnostics.len() > 5 {
+                                let remaining = diagnostics.len() - 5;
+                                ui.label(self.format_indexed(
+                                    "panel.lsp.more_diagnostics",
+                                    &[remaining.to_string()],
+                                ));
+                            }
+                        }
                     }
                     other => {
-                        ui.label(format!("Panel '{other}' has no content in preview mode."));
+                        let template = self.text("panel.generic.no_content").into_owned();
+                        ui.label(template.replace("{panel}", other));
                     }
                 }
             });
@@ -769,12 +970,21 @@ impl RustNotePadApp {
 
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
-                    ui.label(format!(
-                        "Ln {}, Col {} | Lines {}",
-                        self.status.line, self.status.column, self.status.lines
+                    ui.label(self.format_indexed(
+                        "status.position",
+                        &[
+                            self.status.line.to_string(),
+                            self.status.column.to_string(),
+                            self.status.lines.to_string(),
+                        ],
                     ));
                     ui.separator();
-                    ui.label(format!("Sel {}", self.status.selection));
+                    ui.label(
+                        self.format_indexed(
+                            "status.selection",
+                            &[self.status.selection.to_string()],
+                        ),
+                    );
                     ui.separator();
                     ui.label(self.status.mode);
                     ui.separator();
@@ -782,13 +992,20 @@ impl RustNotePadApp {
                     ui.separator();
                     ui.label(self.status.eol);
                     ui.separator();
-                    ui.label(format!("Lang: {}", self.status.document_language));
+                    ui.label(self.format_indexed(
+                        "status.lang_label",
+                        &[self.status.document_language.clone()],
+                    ));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
-                    ui.label(format!("UI: {}", self.status.ui_language));
+                    ui.label(
+                        self.format_indexed("status.ui_label", &[self.status.ui_language.clone()]),
+                    );
                     ui.separator();
-                    ui.label(format!("Theme: {}", self.status.theme));
+                    ui.label(
+                        self.format_indexed("status.theme_label", &[self.status.theme.clone()]),
+                    );
                 });
             });
     }
@@ -860,11 +1077,14 @@ impl RustNotePadApp {
                                 self.render_tab_strip(ui, pane.clone());
                                 ui.separator();
                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                    ui.label("Secondary View (preview)");
+                                    ui.label(self.text("panel.secondary.title"));
                                     ui.add_space(6.0);
                                     if let Some(active) = pane.active_tab() {
-                                        ui.label(format!("Active: {}", active.title));
-                                        ui.label("Preview is read-only in UI mock.");
+                                        ui.label(self.format_indexed(
+                                            "panel.secondary.active",
+                                            &[active.title.clone()],
+                                        ));
+                                        ui.label(self.text("panel.secondary.readonly"));
                                     }
                                 });
                             },
@@ -876,13 +1096,13 @@ impl RustNotePadApp {
     }
 
     fn render_highlight_summary(&self, ui: &mut egui::Ui) {
-        ui.heading("Syntax Highlight / 語法高亮摘要");
+        ui.heading(self.text("highlight.heading").to_string());
         match self
             .highlight_registry
             .highlight(self.current_language_id.as_str(), &self.editor_preview)
         {
             Ok(tokens) => {
-                ui.label(format!("Tokens: {}", tokens.len()));
+                ui.label(self.format_indexed("highlight.tokens", &[tokens.len().to_string()]));
                 let mut counts: BTreeMap<String, usize> = BTreeMap::new();
                 for token in &tokens {
                     *counts.entry(format!("{:?}", token.kind)).or_insert(0) += 1;
@@ -891,7 +1111,7 @@ impl RustNotePadApp {
                     ui.label(format!("{kind}: {count}"));
                 }
                 ui.add_space(6.0);
-                ui.label(RichText::new("Sample / 範例").italics());
+                ui.label(RichText::new(self.text("highlight.sample").to_string()).italics());
                 for token in tokens.iter().take(6) {
                     if let Some(snippet) = self.editor_preview.get(token.range.clone()) {
                         let snippet = snippet.replace('\n', " ");
@@ -903,20 +1123,20 @@ impl RustNotePadApp {
                     }
                 }
                 if tokens.len() > 6 {
-                    ui.label("…");
+                    ui.label(self.text("highlight.more").to_string());
                 }
             }
             Err(err) => {
                 ui.colored_label(
                     Color32::from_rgb(239, 68, 68),
-                    format!("Highlight error: {err}"),
+                    self.format_indexed("highlight.error", &[err.to_string()]),
                 );
             }
         }
     }
 
     fn render_function_list_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Function List / 函式清單");
+        ui.heading(self.text("function.heading").to_string());
         match self
             .function_registry
             .parse(self.current_language_id.as_str(), &self.editor_preview)
@@ -924,10 +1144,17 @@ impl RustNotePadApp {
             Some(entries) if !entries.is_empty() => {
                 for entry in entries.iter().take(10) {
                     let line = line_number_for_range(&self.editor_preview, &entry.range);
-                    let label = format!("{:?} {} (Ln {line})", entry.kind, entry.name);
+                    let label = self.format_indexed(
+                        "function.entry_label",
+                        &[
+                            format!("{:?}", entry.kind),
+                            entry.name.clone(),
+                            line.to_string(),
+                        ],
+                    );
                     if ui
                         .selectable_label(false, label)
-                        .on_hover_text("Go to symbol / 跳至符號")
+                        .on_hover_text(self.text("function.navigate_hover").to_string())
                         .clicked()
                     {
                         self.status.line = line;
@@ -937,23 +1164,44 @@ impl RustNotePadApp {
                 }
                 if entries.len() > 10 {
                     let remaining = entries.len() - 10;
-                    ui.label(format!(
-                        "… {remaining} additional symbols / 另有 {remaining} 個符號"
-                    ));
+                    ui.label(self.format_indexed("function.more", &[remaining.to_string()]));
                 }
             }
             _ => {
-                ui.label("No symbols detected. / 尚未偵測到任何符號。");
+                ui.label(self.text("function.no_symbols").to_string());
             }
         }
     }
 
     fn render_completion_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Autocomplete / 自動完成");
+        ui.heading(self.text("autocomplete.heading").to_string());
+        ui.horizontal(|ui| {
+            let lsp_online = self.lsp_client.is_online();
+            let mut lsp_enabled = self
+                .lsp_client
+                .is_enabled(self.current_language_id.as_str());
+            if ui
+                .checkbox(
+                    &mut lsp_enabled,
+                    self.text("autocomplete.enable_lsp").to_string(),
+                )
+                .changed()
+            {
+                self.lsp_client
+                    .set_enabled(self.current_language_id.clone(), lsp_enabled);
+                self.refresh_completions();
+            }
+            if !lsp_online {
+                ui.colored_label(
+                    Color32::from_rgb(239, 68, 68),
+                    self.text("autocomplete.lsp_offline").to_string(),
+                );
+            }
+        });
         let mut prefix = self.completion_prefix.clone();
         let response = ui.add(
             egui::TextEdit::singleline(&mut prefix)
-                .hint_text("Prefix / 前綴")
+                .hint_text(self.text("autocomplete.prefix_hint").to_string())
                 .desired_width(f32::INFINITY),
         );
         if response.changed() {
@@ -962,7 +1210,7 @@ impl RustNotePadApp {
         }
 
         if self.completion_results.is_empty() {
-            ui.label("No suggestions available. / 目前沒有建議。");
+            ui.label(self.text("autocomplete.no_suggestions").to_string());
         } else {
             let visible = self.completion_results.len().min(10);
             for idx in 0..visible {
@@ -970,13 +1218,13 @@ impl RustNotePadApp {
                     let kind = format!("{:?}", item.kind);
                     let detail = item.detail.as_deref().unwrap_or("");
                     let label = if detail.is_empty() {
-                        format!("{kind} — {}", item.label)
+                        format!("{kind} - {}", item.label)
                     } else {
-                        format!("{kind} — {} ({detail})", item.label)
+                        format!("{kind} - {} ({detail})", item.label)
                     };
                     if ui
                         .selectable_label(false, label)
-                        .on_hover_text("Apply suggestion / 套用建議")
+                        .on_hover_text(self.text("autocomplete.apply_hover").to_string())
                         .clicked()
                     {
                         self.completion_prefix = item.label.clone();
@@ -986,9 +1234,9 @@ impl RustNotePadApp {
             }
             if self.completion_results.len() > 10 {
                 let remaining = self.completion_results.len() - 10;
-                ui.label(format!(
-                    "… {remaining} more suggestions / 另有 {remaining} 筆建議"
-                ));
+                ui.label(
+                    self.format_indexed("autocomplete.more_suggestions", &[remaining.to_string()]),
+                );
             }
         }
     }
@@ -1053,7 +1301,7 @@ impl RustNotePadApp {
                 let close = egui::Button::new(RichText::new("✕").small()).frame(false);
                 if ui
                     .add(close)
-                    .on_hover_text("Close tab / 關閉分頁")
+                    .on_hover_text(self.text("tabs.close_hover").to_string())
                     .clicked()
                 {
                     self.close_tab(role, &tab.id);
@@ -1069,7 +1317,7 @@ impl RustNotePadApp {
             let label = format!("{indent}{}", node.label);
             if ui
                 .selectable_label(false, label)
-                .on_hover_text("Open document / 開啟文件")
+                .on_hover_text(self.text("explorer.open_document_hover").to_string())
                 .clicked()
             {
                 if let Some(path) = node.path {
@@ -1105,6 +1353,15 @@ impl App for RustNotePadApp {
 
 fn color32_from_color(color: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a)
+}
+
+fn diagnostic_color(severity: DiagnosticSeverity) -> Color32 {
+    match severity {
+        DiagnosticSeverity::Error => Color32::from_rgb(239, 68, 68),
+        DiagnosticSeverity::Warning => Color32::from_rgb(249, 115, 22),
+        DiagnosticSeverity::Information => Color32::from_rgb(59, 130, 246),
+        DiagnosticSeverity::Hint => Color32::from_rgb(148, 163, 184),
+    }
 }
 
 fn parse_tag_color(tag: TabColorTag) -> Color {
@@ -1144,15 +1401,13 @@ fn language_id_from_hint(hint: &str) -> Option<&'static str> {
     }
 }
 
-fn language_display_name(language_id: &str) -> &'static str {
+fn language_display_key(language_id: &str) -> &'static str {
     match language_id {
-        "rust" => "Rust",
-        "json" => "JSON",
-        "plaintext" => "Plain Text",
-        other => match other {
-            "markdown" => "Markdown",
-            _ => "Plain Text",
-        },
+        "rust" => "language.name.rust",
+        "json" => "language.name.json",
+        "plaintext" => "language.name.plaintext",
+        "markdown" => "language.name.markdown",
+        _ => "language.name.plaintext",
     }
 }
 

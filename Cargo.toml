@@ -5,6 +5,7 @@ members = [
     "crates/core",
     "crates/highlight",
     "crates/function_list",
+    "crates/lsp_client",
     "crates/settings",
     "crates/search",
     "apps/cli",

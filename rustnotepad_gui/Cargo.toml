@@ -11,6 +11,7 @@ rustnotepad_settings = { path = "../crates/settings" }
 rustnotepad_autocomplete = { path = "../crates/autocomplete" }
 rustnotepad_function_list = { path = "../crates/function_list" }
 rustnotepad_highlight = { path = "../crates/highlight" }
+rustnotepad_lsp_client = { path = "../crates/lsp_client" }
 
 [[bin]]
 name = "rustnotepad"

@@ -2610,6 +2610,7 @@ dependencies = [
  "rustnotepad_autocomplete",
  "rustnotepad_function_list",
  "rustnotepad_highlight",
+ "rustnotepad_lsp_client",
  "rustnotepad_settings",
 ]
 
@@ -2626,6 +2627,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustnotepad_lsp_client"
+version = "0.1.0"
+dependencies = [
+ "rustnotepad_autocomplete",
+]
+
+[[package]]
 name = "rustnotepad_search"
 version = "0.1.0"
 dependencies = [
@@ -2639,8 +2647,10 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "rustnotepad_highlight",
+ "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]

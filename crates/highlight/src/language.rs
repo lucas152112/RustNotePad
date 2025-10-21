@@ -59,6 +59,7 @@ pub struct LanguageDefinition {
     pub display_name: String,
     pub extensions: Vec<String>,
     pub case_sensitive: bool,
+    pub keywords: Vec<String>,
 
     keyword_regex: Option<Regex>,
     operator_regex: Option<Regex>,
@@ -72,7 +73,8 @@ pub struct LanguageDefinition {
 impl LanguageDefinition {
     pub fn from_udl(udl: UdlDefinition) -> Result<Self, HighlightError> {
         let id = LanguageId::from(udl.identifier.clone().unwrap_or_else(|| udl.name.clone()));
-        let keyword_regex = build_keyword_regex(&udl.keywords, udl.case_sensitive)?;
+        let keywords = udl.keywords.clone();
+        let keyword_regex = build_keyword_regex(&keywords, udl.case_sensitive)?;
         let operator_regex = build_operator_regex(&udl.operators)?;
         let number_regex = build_number_regex(udl.number_pattern.as_deref())?;
         let line_comment = udl.line_comment.clone();
@@ -95,6 +97,7 @@ impl LanguageDefinition {
             display_name: udl.name,
             extensions: udl.extensions,
             case_sensitive: udl.case_sensitive,
+            keywords,
             keyword_regex,
             operator_regex,
             number_regex,
@@ -103,6 +106,10 @@ impl LanguageDefinition {
             string_delimiters,
             additional_rules: Vec::new(),
         })
+    }
+
+    pub fn keywords(&self) -> &[String] {
+        &self.keywords
     }
 
     pub fn highlight(&self, input: &str) -> Vec<HighlightToken> {
