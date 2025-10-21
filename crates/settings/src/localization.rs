@@ -147,6 +147,8 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ("settings.preferences.autosave_suffix", " min"),
     ("settings.preferences.line_numbers", "Show line numbers"),
     ("settings.preferences.highlight_line", "Highlight active line"),
+    ("settings.preferences.localization_heading", "Localization"),
+    ("settings.preferences.localization_label", "Select interface language"),
     (
         "settings.preferences.note",
         "Changes are saved automatically for the preview state.",

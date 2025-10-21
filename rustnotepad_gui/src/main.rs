@@ -1435,12 +1435,8 @@ impl RustNotePadApp {
         ui.heading(self.text("settings.preferences.heading").to_string());
         ui.separator();
         let autosave_label = self.text("settings.preferences.autosave").to_string();
-        let line_numbers_label = self
-            .text("settings.preferences.line_numbers")
-            .to_string();
-        let highlight_label = self
-            .text("settings.preferences.highlight_line")
-            .to_string();
+        let line_numbers_label = self.text("settings.preferences.line_numbers").to_string();
+        let highlight_label = self.text("settings.preferences.highlight_line").to_string();
         let suffix = self
             .text("settings.preferences.autosave_suffix")
             .to_string();
@@ -1458,10 +1454,43 @@ impl RustNotePadApp {
             );
         });
         ui.checkbox(&mut self.preferences.show_line_numbers, line_numbers_label);
-        ui.checkbox(
-            &mut self.preferences.highlight_active_line,
-            highlight_label,
+        ui.checkbox(&mut self.preferences.highlight_active_line, highlight_label);
+        ui.add_space(12.0);
+
+        // Render locale selector similar to Notepad++ preferences panel.
+        // （仿照 Notepad++ 偏好設定面板呈現語系選擇器。）
+        ui.separator();
+        ui.heading(
+            self.text("settings.preferences.localization_heading")
+                .to_string(),
         );
+        let locale_summaries = self.localization.locale_summaries();
+        let mut locale_index = self.selected_locale;
+        let current_locale = locale_summaries
+            .get(locale_index)
+            .map(|summary| summary.display_name.clone())
+            .unwrap_or_else(|| "English (en-US)".to_string());
+        ui.label(
+            self.text("settings.preferences.localization_label")
+                .to_string(),
+        );
+        egui::ComboBox::from_id_source("preferences_locale_selector")
+            .width(220.0)
+            .selected_text(current_locale)
+            .show_ui(ui, |ui| {
+                for (idx, summary) in locale_summaries.iter().enumerate() {
+                    let selected = idx == locale_index;
+                    if ui
+                        .selectable_label(selected, &summary.display_name)
+                        .clicked()
+                    {
+                        locale_index = idx;
+                    }
+                }
+            });
+        if locale_index != self.selected_locale {
+            self.apply_locale_change(locale_index, &locale_summaries);
+        }
         ui.add_space(12.0);
         ui.label(RichText::new(self.text("settings.preferences.note").to_string()).italics());
     }

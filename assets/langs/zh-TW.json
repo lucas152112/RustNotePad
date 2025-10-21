@@ -124,6 +124,8 @@
     "settings.preferences.autosave_suffix": " 分",
     "settings.preferences.line_numbers": "顯示行號",
     "settings.preferences.highlight_line": "突顯目前行",
+    "settings.preferences.localization_heading": "介面語系",
+    "settings.preferences.localization_label": "選擇介面語系",
     "settings.preferences.note": "預覽模式中的設定會即時套用，無須手動儲存。",
     "settings.style.heading": "樣式設定器",
     "settings.style.theme_label": "可用佈景",
