@@ -17,6 +17,7 @@ use rustnotepad_settings::{
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -287,6 +288,7 @@ struct RustNotePadApp {
     status: StatusBarState,
     pending_theme_refresh: bool,
     fonts_installed: bool,
+    cjk_font_available: bool,
     font_warning: Option<String>,
     highlight_registry: LanguageRegistry,
     function_registry: ParserRegistry,
@@ -416,6 +418,7 @@ impl Default for RustNotePadApp {
             status,
             pending_theme_refresh: true,
             fonts_installed: false,
+            cjk_font_available: false,
             font_warning: None,
             highlight_registry,
             function_registry,
@@ -430,6 +433,15 @@ impl Default for RustNotePadApp {
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
+
+        if let Ok(locale_override) = env::var("RUSTNOTEPAD_LOCALE") {
+            let summaries = app.localization.locale_summaries();
+            if let Some(idx) = summaries.iter().position(|summary| summary.code == locale_override)
+            {
+                app.apply_locale_change(idx, &summaries);
+            }
+        }
+
         app
     }
 }
@@ -507,6 +519,17 @@ impl RustNotePadApp {
     }
 
     fn apply_locale_change(&mut self, index: usize, summaries: &[LocaleSummary]) {
+        if let Some(target) = summaries.get(index) {
+            if locale_requires_cjk(&target.code) && !self.cjk_font_available {
+                self.font_warning = Some(
+                    self.localization
+                        .text("fonts.warning.cjk_missing")
+                        .into_owned(),
+                );
+                return;
+            }
+        }
+
         if !self.localization.set_active_by_index(index) {
             return;
         }
@@ -719,8 +742,13 @@ impl RustNotePadApp {
             if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
                 family.push(name);
             }
+            self.cjk_font_available = true;
+            self.font_warning = None;
         } else if self.font_warning.is_none() {
             self.font_warning = Some(self.text("fonts.warning.cjk_missing").into_owned());
+            self.cjk_font_available = false;
+        } else {
+            self.cjk_font_available = false;
         }
 
         ctx.set_fonts(definitions);
@@ -1539,6 +1567,15 @@ fn language_display_key(language_id: &str) -> &'static str {
     }
 }
 
+fn locale_requires_cjk(code: &str) -> bool {
+    let normalised = code.to_ascii_lowercase();
+    normalised.starts_with("zh")
+        || normalised.starts_with("ja")
+        || normalised.starts_with("ko")
+        || normalised == "zh-tw"
+        || normalised == "zh-cn"
+}
+
 fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
     let trimmed = snippet.trim();
     if trimmed.chars().count() <= max_chars {
@@ -1608,6 +1645,58 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|_cc| Box::<RustNotePadApp>::default()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_to_traditional_chinese_locale_does_not_panic() {
+        // The GUI reads localization files relative to the workspace root at runtime.
+        // （圖形介面在執行時會相對於工作區根目錄讀取語系檔案。）
+        // Tests run with the crate directory as the CWD, so adjust to ensure assets resolve.
+        // （測試以 crate 目錄為目前路徑執行，因此需調整路徑以正確載入資源。）
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+        app.cjk_font_available = true;
+        let summaries = app.localization.locale_summaries();
+        let zh_tw_index = summaries
+            .iter()
+            .enumerate()
+            .find_map(|(idx, summary)| (summary.code == "zh-TW").then_some(idx))
+            .expect("zh-TW locale available");
+        app.apply_locale_change(zh_tw_index, &summaries);
+        assert_eq!(app.selected_locale, zh_tw_index);
+    }
+
+    #[test]
+    fn switching_to_traditional_chinese_without_cjk_font_is_blocked() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+        app.cjk_font_available = false;
+        let summaries = app.localization.locale_summaries();
+        let zh_tw_index = summaries
+            .iter()
+            .enumerate()
+            .find_map(|(idx, summary)| (summary.code == "zh-TW").then_some(idx))
+            .expect("zh-TW locale available");
+        let original_index = app.selected_locale;
+
+        app.apply_locale_change(zh_tw_index, &summaries);
+
+        assert_eq!(app.selected_locale, original_index);
+        assert!(
+            app.font_warning.is_some(),
+            "expected a font warning when CJK font is unavailable"
+        );
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
