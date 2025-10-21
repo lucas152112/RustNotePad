@@ -15,7 +15,6 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
         "// RustNotePad UI Preview\nfn main() {\n    let mut search_engine = SearchEngine::new(\"alpha beta gamma\");\n    let options = SearchOptions::new(\"beta\");\n    if let Some(hit) = search_engine.find(0, &options).expect(\"search\") {\n        println!(\"Found match at byte {}\", hit.start);\n    }\n}\n",
     ),
     ("toolbar.workspace_prefix", "Workspace"),
-    ("toolbar.ui_locale", "UI Locale"),
     ("toolbar.split_prefix", "Split "),
     ("toolbar.pinned_tabs", "Pinned tabs: {0}"),
     ("menu.file", "File"),

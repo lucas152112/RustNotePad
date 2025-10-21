@@ -766,54 +766,6 @@ impl RustNotePadApp {
                     );
                     ui.label(RichText::new(workspace_label).strong());
                     ui.separator();
-
-                    let theme_names: Vec<&str> = self.theme_manager.theme_names().collect();
-                    let mut active_index = self.theme_manager.active_index();
-                    egui::ComboBox::from_id_source("theme_selector")
-                        .width(200.0)
-                        .selected_text(theme_names[active_index])
-                        .show_ui(ui, |ui| {
-                            for (idx, name) in theme_names.iter().enumerate() {
-                                let selected = idx == active_index;
-                                if ui.selectable_label(selected, *name).clicked() {
-                                    active_index = idx;
-                                }
-                            }
-                        });
-                    if active_index != self.theme_manager.active_index() {
-                        if self.theme_manager.set_active_index(active_index).is_some() {
-                            self.pending_theme_refresh = true;
-                        }
-                    }
-
-                    ui.separator();
-                    let locale_label = format!("{}:", self.text("toolbar.ui_locale"));
-                    ui.label(locale_label);
-                    let locale_summaries = self.localization.locale_summaries();
-                    let mut locale_index = self.selected_locale;
-                    let current_locale_text = locale_summaries
-                        .get(locale_index)
-                        .map(|summary| summary.display_name.clone())
-                        .unwrap_or_else(|| "English (en-US)".to_string());
-                    egui::ComboBox::from_id_source("locale_selector")
-                        .width(200.0)
-                        .selected_text(current_locale_text)
-                        .show_ui(ui, |ui| {
-                            for (idx, summary) in locale_summaries.iter().enumerate() {
-                                let selected = idx == locale_index;
-                                if ui
-                                    .selectable_label(selected, &summary.display_name)
-                                    .clicked()
-                                {
-                                    locale_index = idx;
-                                }
-                            }
-                        });
-                    if locale_index != self.selected_locale {
-                        self.apply_locale_change(locale_index, &locale_summaries);
-                    }
-
-                    ui.separator();
                     let mut ratio = self.layout.split_ratio;
                     if ui
                         .add(

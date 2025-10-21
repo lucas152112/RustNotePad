@@ -4,7 +4,6 @@
   "strings": {
     "sample.editor_preview": "// RustNotePad 介面預覽\nfn main() {\n    let mut search_engine = SearchEngine::new(\"alpha beta gamma\");\n    let options = SearchOptions::new(\"beta\");\n    if let Some(hit) = search_engine.find(0, &options).expect(\"search\") {\n        println!(\"在位元組 {} 找到結果\", hit.start);\n    }\n}\n",
     "toolbar.workspace_prefix": "工作區",
-    "toolbar.ui_locale": "介面語系",
     "toolbar.split_prefix": "分割 ",
     "toolbar.pinned_tabs": "釘選分頁：{0}",
     "menu.file": "檔案",
@@ -41,7 +40,7 @@
     "menu.settings": "設定",
     "menu.settings.preferences": "偏好設定...",
     "menu.settings.style_configurator": "樣式設定器...",
-    "menu.settings.shortcut_mapper": "快速鍵管理器...",
+    "menu.settings.shortcut_mapper": "快捷鍵管理...",
     "menu.settings.edit_popup_menu": "編輯右鍵選單...",
     "menu.macro": "巨集",
     "menu.macro.start_recording": "開始錄製",
