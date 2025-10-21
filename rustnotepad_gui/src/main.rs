@@ -280,6 +280,8 @@ struct RustNotePadApp {
     selected_locale: usize,
     localization: LocalizationManager,
     sample_editor_content: String,
+    show_settings_window: bool,
+    active_settings_page: SettingsPage,
     theme_manager: ThemeManager,
     palette: ResolvedPalette,
     status: StatusBarState,
@@ -295,6 +297,7 @@ struct RustNotePadApp {
     completion_results: Vec<CompletionItem>,
     current_document_id: String,
     current_language_id: String,
+    preferences: PreferencesState,
 }
 
 impl Default for RustNotePadApp {
@@ -406,6 +409,8 @@ impl Default for RustNotePadApp {
             selected_locale,
             localization,
             sample_editor_content,
+            show_settings_window: false,
+            active_settings_page: SettingsPage::Preferences,
             theme_manager,
             palette,
             status,
@@ -421,6 +426,7 @@ impl Default for RustNotePadApp {
             completion_results: Vec::new(),
             current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
             current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
+            preferences: PreferencesState::default(),
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -521,6 +527,20 @@ impl RustNotePadApp {
         self.status
             .set_document_language(self.language_display_name(&self.current_language_id));
         self.refresh_completions();
+    }
+
+    fn handle_settings_command(&mut self, item_key: &str) {
+        let target_page = match item_key {
+            "menu.settings.preferences" => Some(SettingsPage::Preferences),
+            "menu.settings.style_configurator" => Some(SettingsPage::StyleConfigurator),
+            "menu.settings.shortcut_mapper" => Some(SettingsPage::ShortcutMapper),
+            "menu.settings.edit_popup_menu" => Some(SettingsPage::ContextMenu),
+            _ => None,
+        };
+        if let Some(page) = target_page {
+            self.active_settings_page = page;
+            self.show_settings_window = true;
+        }
     }
 
     fn open_document(&mut self, path: &str, display: &str) {
@@ -715,9 +735,17 @@ impl RustNotePadApp {
                     for section in MENU_STRUCTURE.iter() {
                         let title = self.text(section.title_key).into_owned();
                         ui.menu_button(title, |ui| {
+                            let is_settings = section.title_key == "menu.settings";
                             for item_key in section.item_keys {
                                 let label = self.text(item_key).into_owned();
-                                ui.add_enabled(false, egui::Button::new(label));
+                                if is_settings {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_settings_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else {
+                                    ui.add_enabled(false, egui::Button::new(label));
+                                }
                             }
                         });
                     }
@@ -1348,11 +1376,130 @@ impl App for RustNotePadApp {
         self.show_bottom_dock(ctx);
         self.show_status_bar(ctx);
         self.show_editor_area(ctx);
+        self.render_settings_window(ctx);
     }
 }
 
 fn color32_from_color(color: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a)
+}
+
+impl RustNotePadApp {
+    fn render_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings_window {
+            return;
+        }
+        let mut open = self.show_settings_window;
+        egui::Window::new(self.text("settings.window.title").to_string())
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.set_min_height(320.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(180.0);
+                        ui.heading(self.text("settings.window.sections").to_string());
+                        ui.separator();
+                        let tabs = [
+                            (SettingsPage::Preferences, "settings.tab.preferences"),
+                            (SettingsPage::StyleConfigurator, "settings.tab.style"),
+                            (SettingsPage::ShortcutMapper, "settings.tab.shortcuts"),
+                            (SettingsPage::ContextMenu, "settings.tab.context_menu"),
+                        ];
+                        for (page, key) in tabs.iter() {
+                            let label = self.text(key).to_string();
+                            ui.selectable_value(&mut self.active_settings_page, *page, label);
+                        }
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_width(ui.available_width());
+                        match self.active_settings_page {
+                            SettingsPage::Preferences => self.render_preferences_page(ui),
+                            SettingsPage::StyleConfigurator => self.render_style_configurator(ui),
+                            SettingsPage::ShortcutMapper => {
+                                self.render_placeholder_page(ui, "settings.shortcuts.placeholder")
+                            }
+                            SettingsPage::ContextMenu => {
+                                self.render_placeholder_page(ui, "settings.context.placeholder")
+                            }
+                        }
+                    });
+                });
+            });
+        self.show_settings_window = open;
+    }
+
+    fn render_preferences_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading(self.text("settings.preferences.heading").to_string());
+        ui.separator();
+        let autosave_label = self.text("settings.preferences.autosave").to_string();
+        let line_numbers_label = self
+            .text("settings.preferences.line_numbers")
+            .to_string();
+        let highlight_label = self
+            .text("settings.preferences.highlight_line")
+            .to_string();
+        let suffix = self
+            .text("settings.preferences.autosave_suffix")
+            .to_string();
+        ui.checkbox(&mut self.preferences.autosave_enabled, autosave_label);
+        ui.horizontal(|ui| {
+            ui.label(
+                self.text("settings.preferences.autosave_interval")
+                    .to_string(),
+            );
+            ui.add(
+                egui::DragValue::new(&mut self.preferences.autosave_interval_minutes)
+                    .clamp_range(1..=60)
+                    .speed(1.0)
+                    .suffix(suffix),
+            );
+        });
+        ui.checkbox(&mut self.preferences.show_line_numbers, line_numbers_label);
+        ui.checkbox(
+            &mut self.preferences.highlight_active_line,
+            highlight_label,
+        );
+        ui.add_space(12.0);
+        ui.label(RichText::new(self.text("settings.preferences.note").to_string()).italics());
+    }
+
+    fn render_style_configurator(&mut self, ui: &mut egui::Ui) {
+        ui.heading(self.text("settings.style.heading").to_string());
+        ui.separator();
+        let theme_names: Vec<&str> = self.theme_manager.theme_names().collect();
+        let mut active_index = self.theme_manager.active_index();
+        ui.label(self.text("settings.style.theme_label").to_string());
+        ui.vertical(|ui| {
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for (idx, name) in theme_names.iter().enumerate() {
+                        let selected = idx == active_index;
+                        if ui.selectable_label(selected, *name).clicked() {
+                            active_index = idx;
+                        }
+                    }
+                });
+        });
+        if active_index != self.theme_manager.active_index() {
+            if self.theme_manager.set_active_index(active_index).is_some() {
+                self.pending_theme_refresh = true;
+                self.status
+                    .set_theme(&self.theme_manager.active_theme().name);
+            }
+        }
+        ui.add_space(12.0);
+        ui.label(RichText::new(self.text("settings.style.note").to_string()).italics());
+    }
+
+    fn render_placeholder_page(&self, ui: &mut egui::Ui, key: &str) {
+        ui.heading(self.text("settings.placeholder.heading").to_string());
+        ui.separator();
+        ui.label(self.text(key).to_string());
+    }
 }
 
 fn diagnostic_color(severity: DiagnosticSeverity) -> Color32 {
@@ -1480,4 +1627,30 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|_cc| Box::<RustNotePadApp>::default()),
     )
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Preferences,
+    StyleConfigurator,
+    ShortcutMapper,
+    ContextMenu,
+}
+
+#[derive(Debug, Clone)]
+struct PreferencesState {
+    autosave_enabled: bool,
+    autosave_interval_minutes: u32,
+    show_line_numbers: bool,
+    highlight_active_line: bool,
+}
+
+impl Default for PreferencesState {
+    fn default() -> Self {
+        Self {
+            autosave_enabled: true,
+            autosave_interval_minutes: 5,
+            show_line_numbers: true,
+            highlight_active_line: true,
+        }
+    }
 }

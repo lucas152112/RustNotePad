@@ -135,6 +135,37 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
         "fonts.warning.cjk_missing",
         "Missing system Traditional Chinese font. Install Noto Sans TC, Microsoft JhengHei, or PingFang, then restart RustNotePad.",
     ),
+    ("settings.window.title", "Settings"),
+    ("settings.window.sections", "Sections"),
+    ("settings.tab.preferences", "Preferences"),
+    ("settings.tab.style", "Style Configurator"),
+    ("settings.tab.shortcuts", "Shortcut Mapper"),
+    ("settings.tab.context_menu", "Popup Context Menu"),
+    ("settings.preferences.heading", "Editor Preferences"),
+    ("settings.preferences.autosave", "Enable autosave"),
+    ("settings.preferences.autosave_interval", "Autosave interval"),
+    ("settings.preferences.autosave_suffix", " min"),
+    ("settings.preferences.line_numbers", "Show line numbers"),
+    ("settings.preferences.highlight_line", "Highlight active line"),
+    (
+        "settings.preferences.note",
+        "Changes are saved automatically for the preview state.",
+    ),
+    ("settings.style.heading", "Style Configurator"),
+    ("settings.style.theme_label", "Available themes"),
+    (
+        "settings.style.note",
+        "Select a theme to apply it immediately to the preview.",
+    ),
+    ("settings.placeholder.heading", "Coming Soon"),
+    (
+        "settings.shortcuts.placeholder",
+        "Shortcut mapping will be available in a future build.",
+    ),
+    (
+        "settings.context.placeholder",
+        "Popup menu customization is not yet available in this preview.",
+    ),
 ];
 
 #[derive(Debug, Error)]

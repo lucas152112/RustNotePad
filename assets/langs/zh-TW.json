@@ -111,6 +111,25 @@
     "language.name.json": "JSON",
     "language.name.plaintext": "純文字",
     "language.name.markdown": "Markdown",
-    "fonts.warning.cjk_missing": "未找到系統內建的正體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援正體中文的字型後重啟 RustNotePad。"
+    "fonts.warning.cjk_missing": "未找到系統內建的正體中文字型。請安裝（或放置於 assets/fonts/）Noto Sans TC、微軟正黑體、蘋方等支援正體中文的字型後重啟 RustNotePad。",
+    "settings.window.title": "設定",
+    "settings.window.sections": "設定項目",
+    "settings.tab.preferences": "偏好設定",
+    "settings.tab.style": "樣式設定器",
+    "settings.tab.shortcuts": "快捷鍵管理",
+    "settings.tab.context_menu": "右鍵選單",
+    "settings.preferences.heading": "編輯器偏好",
+    "settings.preferences.autosave": "啟用自動儲存",
+    "settings.preferences.autosave_interval": "自動儲存間隔",
+    "settings.preferences.autosave_suffix": " 分",
+    "settings.preferences.line_numbers": "顯示行號",
+    "settings.preferences.highlight_line": "突顯目前行",
+    "settings.preferences.note": "預覽模式中的設定會即時套用，無須手動儲存。",
+    "settings.style.heading": "樣式設定器",
+    "settings.style.theme_label": "可用佈景",
+    "settings.style.note": "選擇佈景主題後會立即套用至預覽介面。",
+    "settings.placeholder.heading": "即將推出",
+    "settings.shortcuts.placeholder": "快捷鍵管理功能將在後續版本提供。",
+    "settings.context.placeholder": "右鍵選單自訂功能目前於預覽版尚未開放。"
   }
 }
