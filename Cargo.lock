@@ -2611,6 +2611,8 @@ dependencies = [
  "rustnotepad_function_list",
  "rustnotepad_highlight",
  "rustnotepad_lsp_client",
+ "rustnotepad_macros",
+ "rustnotepad_runexec",
  "rustnotepad_settings",
 ]
 
@@ -2631,6 +2633,24 @@ name = "rustnotepad_lsp_client"
 version = "0.1.0"
 dependencies = [
  "rustnotepad_autocomplete",
+]
+
+[[package]]
+name = "rustnotepad_macros"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rustnotepad_runexec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

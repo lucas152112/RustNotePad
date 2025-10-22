@@ -11,20 +11,51 @@ use rustnotepad_autocomplete::{
 use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange};
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
+use rustnotepad_macros::{MacroError, MacroExecutor, MacroPlayer, MacroRecorder, MacroStore};
+use rustnotepad_runexec::{RunExecutor, RunResult, RunSpec, StdinPayload};
 use rustnotepad_settings::{
     Color, LayoutConfig, LocaleSummary, LocalizationManager, PaneLayout, PaneRole, ResolvedPalette,
     SnippetStore, TabColorTag, TabView, ThemeDefinition, ThemeKind, ThemeManager,
 };
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
 const PREVIEW_LANGUAGE_ID: &str = "rust";
+
+const MAX_MACRO_MESSAGES: usize = 10;
+const MAX_RUN_HISTORY: usize = 6;
+
+static MACRO_COMMAND_OPTIONS: &[(&str, &str)] = &[
+    (
+        "macro.command.uppercase_preview",
+        "Uppercase preview text / 將預覽文字轉成大寫",
+    ),
+    (
+        "macro.command.append_signature",
+        "Append signature comment / 新增簽名註解內容",
+    ),
+];
+
+struct RunLogEntry {
+    title: String,
+    command: String,
+    working_dir: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    cleared_env: bool,
+    result: RunResult,
+    stdout_text: String,
+    stderr_text: String,
+    timeout_ms: Option<u64>,
+    kill_on_timeout: bool,
+}
 
 #[derive(Clone, Copy)]
 struct MenuSection {
@@ -300,6 +331,20 @@ struct RustNotePadApp {
     current_document_id: String,
     current_language_id: String,
     preferences: PreferencesState,
+    macro_recorder: MacroRecorder,
+    macro_store: MacroStore,
+    macro_messages: VecDeque<String>,
+    macro_pending_name: String,
+    macro_input_buffer: String,
+    macro_selected_command: usize,
+    macro_repeat_count: usize,
+    macro_live_events: Vec<String>,
+    selected_macro: Option<String>,
+    run_history: VecDeque<RunLogEntry>,
+    run_last_error: Option<String>,
+    run_timeout_enabled: bool,
+    run_timeout_secs: u64,
+    run_kill_on_timeout: bool,
 }
 
 impl Default for RustNotePadApp {
@@ -404,6 +449,7 @@ impl Default for RustNotePadApp {
         );
         status.set_locale(&locale_display);
 
+        let default_macro_name = "Macro 1".to_string();
         let mut app = Self {
             layout,
             editor_preview: sample_editor_content.clone(),
@@ -430,13 +476,29 @@ impl Default for RustNotePadApp {
             current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
             current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
             preferences: PreferencesState::default(),
+            macro_recorder: MacroRecorder::new(),
+            macro_store: MacroStore::new(),
+            macro_messages: VecDeque::new(),
+            macro_pending_name: default_macro_name,
+            macro_input_buffer: String::new(),
+            macro_selected_command: 0,
+            macro_repeat_count: 1,
+            macro_live_events: Vec::new(),
+            selected_macro: None,
+            run_history: VecDeque::new(),
+            run_last_error: None,
+            run_timeout_enabled: true,
+            run_timeout_secs: 2,
+            run_kill_on_timeout: true,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
 
         if let Ok(locale_override) = env::var("RUSTNOTEPAD_LOCALE") {
             let summaries = app.localization.locale_summaries();
-            if let Some(idx) = summaries.iter().position(|summary| summary.code == locale_override)
+            if let Some(idx) = summaries
+                .iter()
+                .position(|summary| summary.code == locale_override)
             {
                 app.apply_locale_change(idx, &summaries);
             }
@@ -499,6 +561,314 @@ impl RustNotePadApp {
         self.completion_results = result.items;
     }
 
+    fn push_macro_log(&mut self, message: impl Into<String>) {
+        if self.macro_messages.len() >= MAX_MACRO_MESSAGES {
+            self.macro_messages.pop_front();
+        }
+        self.macro_messages.push_back(message.into());
+    }
+
+    fn next_macro_name(&self) -> String {
+        let mut index = self.macro_store.iter().count() + 1;
+        loop {
+            let candidate = format!("Macro {}", index);
+            if self.macro_store.get(&candidate).is_none() {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn after_macro_edit(&mut self) {
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.status.refresh_cursor(&self.editor_preview);
+        self.refresh_completions();
+    }
+
+    fn start_macro_recording(&mut self) {
+        match self.macro_recorder.start() {
+            Ok(_) => {
+                self.macro_pending_name = self.next_macro_name();
+                self.macro_live_events.clear();
+                self.macro_input_buffer.clear();
+                self.push_macro_log("Recording started / 已開始錄製");
+            }
+            Err(err) => {
+                self.push_macro_log(format!(
+                    "Cannot start recording: {err} / 無法開始錄製：{err}"
+                ));
+            }
+        }
+    }
+
+    fn cancel_macro_recording(&mut self) {
+        if self.macro_recorder.is_recording() {
+            self.macro_recorder.cancel();
+            self.macro_live_events.clear();
+            self.macro_input_buffer.clear();
+            self.push_macro_log("Recording cancelled / 已取消錄製");
+        } else {
+            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+        }
+    }
+
+    fn stop_macro_recording(&mut self) {
+        if !self.macro_recorder.is_recording() {
+            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            return;
+        }
+
+        let name = if self.macro_pending_name.trim().is_empty() {
+            self.next_macro_name()
+        } else {
+            self.macro_pending_name.trim().to_string()
+        };
+        match self.macro_recorder.finish(name.clone(), None) {
+            Ok(macro_def) => {
+                if macro_def.is_empty() {
+                    self.push_macro_log("Cannot save empty macro / 無法儲存空巨集");
+                } else if let Err(err) = self.macro_store.insert(macro_def) {
+                    match err {
+                        MacroError::DuplicateMacroName(existing) => {
+                            self.push_macro_log(format!(
+                                "Macro '{existing}' already exists / 巨集「{existing}」已存在"
+                            ));
+                        }
+                        other => {
+                            self.push_macro_log(format!(
+                                "Failed to save macro: {other} / 無法儲存巨集：{other}"
+                            ));
+                        }
+                    }
+                } else {
+                    self.selected_macro = Some(name.clone());
+                    self.push_macro_log(format!("Saved macro '{name}' / 已儲存巨集「{name}」"));
+                    self.macro_pending_name = self.next_macro_name();
+                }
+            }
+            Err(err) => {
+                self.push_macro_log(format!(
+                    "Failed to finish recording: {err} / 無法完成錄製：{err}"
+                ));
+            }
+        }
+        self.macro_live_events.clear();
+        self.macro_input_buffer.clear();
+    }
+
+    fn add_macro_text_event(&mut self) {
+        if !self.macro_recorder.is_recording() {
+            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            return;
+        }
+        let text = self.macro_input_buffer.trim();
+        if text.is_empty() {
+            self.push_macro_log("Enter text before adding / 請先輸入文字再加入");
+            return;
+        }
+        if let Err(err) = self.macro_recorder.record_text(text.to_string()) {
+            self.push_macro_log(format!(
+                "Failed to record text: {err} / 無法記錄文字：{err}"
+            ));
+            return;
+        }
+        let preview = if text.len() > 18 {
+            format!("{}…", &text[..18])
+        } else {
+            text.to_string()
+        };
+        self.macro_live_events.push(format!("text:\"{preview}\""));
+        self.push_macro_log(format!(
+            "Recorded text \"{preview}\" / 已記錄文字「{preview}」"
+        ));
+        self.macro_input_buffer.clear();
+    }
+
+    fn add_macro_command_event(&mut self) {
+        if !self.macro_recorder.is_recording() {
+            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            return;
+        }
+        if MACRO_COMMAND_OPTIONS.is_empty() {
+            self.push_macro_log("No commands registered / 尚未註冊指令");
+            return;
+        }
+        let max_index = MACRO_COMMAND_OPTIONS.len().saturating_sub(1);
+        if self.macro_selected_command > max_index {
+            self.macro_selected_command = max_index;
+        }
+        let (command_id, label) = MACRO_COMMAND_OPTIONS[self.macro_selected_command];
+        if let Err(err) = self.macro_recorder.record_command(command_id.to_string()) {
+            self.push_macro_log(format!(
+                "Failed to record command: {err} / 無法記錄指令：{err}"
+            ));
+            return;
+        }
+        self.macro_live_events.push(format!("command:{command_id}"));
+        self.push_macro_log(format!(
+            "Recorded command '{label}' / 已記錄指令「{label}」"
+        ));
+    }
+
+    fn play_selected_macro(&mut self) {
+        let Some(selected) = self.selected_macro.clone() else {
+            self.push_macro_log("Select a macro first / 請先選擇巨集");
+            return;
+        };
+        let Some(macro_def) = self.macro_store.get(&selected).cloned() else {
+            self.push_macro_log(format!(
+                "Macro '{selected}' not found / 找不到巨集「{selected}」"
+            ));
+            return;
+        };
+        let repeat = NonZeroUsize::new(self.macro_repeat_count.max(1))
+            .unwrap_or(NonZeroUsize::new(1).unwrap());
+        let mut executor = AppMacroExecutor { app: self };
+        match MacroPlayer::play(&macro_def, repeat, &mut executor) {
+            Ok(_) => {
+                self.push_macro_log(format!(
+                    "Played macro '{selected}' ×{} / 已播放巨集「{selected}」×{}",
+                    repeat.get(),
+                    repeat.get()
+                ));
+            }
+            Err(err) => {
+                self.push_macro_log(format!("Playback failed: {err} / 播放失敗：{err}"));
+            }
+        }
+    }
+
+    fn delete_selected_macro(&mut self) {
+        let Some(selected) = self.selected_macro.clone() else {
+            self.push_macro_log("Select a macro first / 請先選擇巨集");
+            return;
+        };
+        match self.macro_store.remove(&selected) {
+            Ok(_) => {
+                self.push_macro_log(format!(
+                    "Deleted macro '{selected}' / 已刪除巨集「{selected}」"
+                ));
+                self.selected_macro = None;
+            }
+            Err(err) => {
+                self.push_macro_log(format!(
+                    "Failed to delete macro: {err} / 無法刪除巨集：{err}"
+                ));
+            }
+        }
+    }
+
+    fn handle_macro_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.macro.start_recording" => self.start_macro_recording(),
+            "menu.macro.stop_recording" => self.stop_macro_recording(),
+            "menu.macro.playback" => self.play_selected_macro(),
+            _ => {
+                self.push_macro_log(format!(
+                    "Unsupported macro command {item_key} / 未支援的巨集指令 {item_key}"
+                ));
+            }
+        }
+    }
+
+    fn handle_run_command(&mut self, item_key: &str) {
+        if let Some((title, spec)) = self.build_run_spec(item_key) {
+            self.execute_run_spec(title, spec);
+        } else {
+            self.run_last_error = Some(format!(
+                "Unsupported run command {item_key} / 未支援的執行指令 {item_key}"
+            ));
+        }
+    }
+
+    fn build_run_spec(&self, item_key: &str) -> Option<(String, RunSpec)> {
+        match item_key {
+            "menu.run.run" => {
+                let spec = RunSpec::new("bash")
+                    .with_args([
+                        "-lc",
+                        "read line; echo \"Macro:\" \"$line\"; echo \"Workspace:\" \"$RUN_WORKSPACE\"",
+                    ])
+                    .with_env("RUN_WORKSPACE", "RustNotePad")
+                    .with_stdin(StdinPayload::Text("preview-input\n".into()))
+                    .with_working_dir("crates/macros");
+                Some((
+                    "Run Macro Preview / 範例執行".to_string(),
+                    self.apply_run_defaults(spec),
+                ))
+            }
+            "menu.run.launch_chrome" => {
+                let spec = RunSpec::new("bash")
+                    .with_args(["-lc", "echo \"Launching Chrome to $RUN_URL\""])
+                    .with_env("RUN_URL", "https://www.rust-lang.org/");
+                Some((
+                    "Launch Chrome preset / 模擬啟動 Chrome".to_string(),
+                    self.apply_run_defaults(spec),
+                ))
+            }
+            "menu.run.launch_firefox" => {
+                let spec = RunSpec::new("bash")
+                    .with_args(["-lc", "echo \"Launching Firefox to $RUN_URL\""])
+                    .clear_env()
+                    .with_env("RUN_URL", "https://notepad-plus-plus.org/");
+                Some((
+                    "Launch Firefox preset / 模擬啟動 Firefox".to_string(),
+                    self.apply_run_defaults(spec),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn execute_run_spec(&mut self, title: String, spec: RunSpec) {
+        let command = Self::format_run_command(&spec);
+        let working_dir = spec.working_dir.clone();
+        let env = spec
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>();
+        let cleared = spec.clear_env;
+        match RunExecutor::execute(&spec) {
+            Ok(result) => {
+                let stdout_text = String::from_utf8_lossy(&result.stdout).into_owned();
+                let stderr_text = String::from_utf8_lossy(&result.stderr).into_owned();
+                let entry = RunLogEntry {
+                    title,
+                    command,
+                    working_dir,
+                    env,
+                    cleared_env: cleared,
+                    result,
+                    stdout_text,
+                    stderr_text,
+                    timeout_ms: spec.timeout_ms,
+                    kill_on_timeout: spec.kill_on_timeout,
+                };
+                self.push_run_history(entry);
+                self.run_last_error = None;
+            }
+            Err(err) => {
+                self.run_last_error = Some(format!("Execution failed: {err} / 執行失敗：{err}"));
+            }
+        }
+    }
+
+    fn format_run_command(spec: &RunSpec) -> String {
+        let mut parts = Vec::new();
+        parts.push(spec.program.clone());
+        parts.extend(spec.args.iter().cloned());
+        parts.join(" ")
+    }
+
+    fn push_run_history(&mut self, entry: RunLogEntry) {
+        if self.run_history.len() >= MAX_RUN_HISTORY {
+            self.run_history.pop_back();
+        }
+        self.run_history.push_front(entry);
+    }
+
     fn text<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
         self.localization.text(key)
     }
@@ -510,6 +880,15 @@ impl RustNotePadApp {
             text = text.replace(&placeholder, value);
         }
         text
+    }
+
+    fn apply_run_defaults(&self, mut spec: RunSpec) -> RunSpec {
+        if self.run_timeout_enabled {
+            let secs = self.run_timeout_secs.max(1);
+            spec = spec.with_timeout(Duration::from_secs(secs));
+        }
+        spec = spec.with_kill_on_timeout(self.run_kill_on_timeout);
+        spec
     }
 
     fn language_display_name(&self, language_id: &str) -> String {
@@ -764,11 +1143,23 @@ impl RustNotePadApp {
                         let title = self.text(section.title_key).into_owned();
                         ui.menu_button(title, |ui| {
                             let is_settings = section.title_key == "menu.settings";
+                            let is_macro = section.title_key == "menu.macro";
+                            let is_run = section.title_key == "menu.run";
                             for item_key in section.item_keys {
                                 let label = self.text(item_key).into_owned();
                                 if is_settings {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_settings_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_macro {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_macro_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_run {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_run_command(item_key);
                                         ui.close_menu();
                                     }
                                 } else {
@@ -847,6 +1238,12 @@ impl RustNotePadApp {
                     ui.add_space(10.0);
                     ui.separator();
                     self.render_completion_panel(ui);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    self.render_macro_panel(ui);
+                    ui.add_space(10.0);
+                    ui.separator();
+                    self.render_run_panel(ui);
                 });
             });
     }
@@ -918,8 +1315,101 @@ impl RustNotePadApp {
                         );
                     }
                     "console" => {
-                        ui.label(self.text("panel.console.command"));
-                        ui.label(self.text("panel.console.finished"));
+                        if let Some(error) = &self.run_last_error {
+                            ui.colored_label(Color32::from_rgb(239, 68, 68), format!("{error}"));
+                            ui.separator();
+                        }
+                        if self.run_history.is_empty() {
+                            ui.label("No run history yet / 尚無執行紀錄");
+                        } else {
+                            for entry in self.run_history.iter() {
+                                ui.group(|ui| {
+                                    let exit_code = entry
+                                        .result
+                                        .exit_code
+                                        .map(|code| code.to_string())
+                                        .unwrap_or_else(|| "signal".to_string());
+                                    ui.label(format!(
+                                        "{}\nExit: {} / 結束碼：{} | Duration: {} ms",
+                                        entry.title, exit_code, exit_code, entry.result.duration_ms
+                                    ));
+                                    ui.label(format!(
+                                        "Command: {} / 指令：{}",
+                                        entry.command, entry.command
+                                    ));
+                                    let workdir = entry
+                                        .working_dir
+                                        .as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|| "-".to_string());
+                                    ui.label(format!(
+                                        "Workdir: {} / 工作目錄：{}",
+                                        workdir, workdir
+                                    ));
+                                    let env_text = if entry.env.is_empty() {
+                                        "-".to_string()
+                                    } else {
+                                        entry
+                                            .env
+                                            .iter()
+                                            .map(|(k, v)| format!("{k}={v}"))
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    };
+                                    ui.label(format!(
+                                        "Env overrides: {} / 環境覆寫：{}",
+                                        env_text, env_text
+                                    ));
+                                    let cleared = if entry.cleared_env {
+                                        "yes / 是"
+                                    } else {
+                                        "no / 否"
+                                    };
+                                    ui.label(format!("Cleared env: {cleared}"));
+                                    let timeout_desc = entry
+                                        .timeout_ms
+                                        .map(|ms| format!("{:.2} s", (ms as f64) / 1000.0))
+                                        .unwrap_or_else(|| "disabled".to_string());
+                                    ui.label(format!(
+                                        "Timeout: {} / 逾時：{}",
+                                        timeout_desc, timeout_desc
+                                    ));
+                                    let kill_desc = if entry.kill_on_timeout {
+                                        "yes / 是"
+                                    } else {
+                                        "no / 否"
+                                    };
+                                    ui.label(format!(
+                                        "Kill on timeout: {kill_desc} / 逾時後終止：{kill_desc}"
+                                    ));
+                                    if entry.result.timed_out {
+                                        ui.colored_label(
+                                            Color32::from_rgb(239, 68, 68),
+                                            "Timed out / 已逾時",
+                                        );
+                                    }
+
+                                    egui::CollapsingHeader::new("stdout / 標準輸出")
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            if entry.stdout_text.trim().is_empty() {
+                                                ui.label("No stdout output / 無標準輸出");
+                                            } else {
+                                                ui.code(entry.stdout_text.clone());
+                                            }
+                                        });
+                                    egui::CollapsingHeader::new("stderr / 標準錯誤")
+                                        .default_open(false)
+                                        .show(ui, |ui| {
+                                            if entry.stderr_text.trim().is_empty() {
+                                                ui.label("No stderr output / 無標準錯誤輸出");
+                                            } else {
+                                                ui.code(entry.stderr_text.clone());
+                                            }
+                                        });
+                                });
+                            }
+                        }
                     }
                     "notifications" => {
                         ui.label(self.text("panel.notifications.idle"));
@@ -1249,6 +1739,190 @@ impl RustNotePadApp {
         }
     }
 
+    fn render_macro_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Macro Recorder / 巨集錄製器");
+        let status_text = if self.macro_recorder.is_recording() {
+            "Status: Recording / 狀態：錄製中"
+        } else {
+            "Status: Idle / 狀態：待命"
+        };
+        ui.label(status_text);
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.macro_recorder.is_recording(),
+                    egui::Button::new("Start / 開始"),
+                )
+                .clicked()
+            {
+                self.start_macro_recording();
+            }
+            if ui
+                .add_enabled(
+                    self.macro_recorder.is_recording(),
+                    egui::Button::new("Stop / 停止"),
+                )
+                .clicked()
+            {
+                self.stop_macro_recording();
+            }
+            if ui
+                .add_enabled(
+                    self.macro_recorder.is_recording(),
+                    egui::Button::new("Cancel / 取消"),
+                )
+                .clicked()
+            {
+                self.cancel_macro_recording();
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label("Macro name / 巨集名稱");
+        ui.text_edit_singleline(&mut self.macro_pending_name);
+
+        ui.add_space(6.0);
+        ui.label("Insert text / 插入文字");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.macro_input_buffer)
+                .hint_text("Enter text to record / 輸入要錄製的文字"),
+        );
+        if ui
+            .add_enabled(
+                self.macro_recorder.is_recording() && !self.macro_input_buffer.trim().is_empty(),
+                egui::Button::new("Add Text Event / 加入文字事件"),
+            )
+            .clicked()
+        {
+            self.add_macro_text_event();
+        }
+
+        ui.add_space(6.0);
+        ui.label("Command / 指令");
+        if !MACRO_COMMAND_OPTIONS.is_empty() {
+            let max_index = MACRO_COMMAND_OPTIONS.len().saturating_sub(1);
+            if self.macro_selected_command > max_index {
+                self.macro_selected_command = max_index;
+            }
+            let current_label = MACRO_COMMAND_OPTIONS[self.macro_selected_command].1;
+            egui::ComboBox::from_id_source("macro_command_combo")
+                .selected_text(current_label)
+                .show_ui(ui, |ui| {
+                    for (idx, (_, label)) in MACRO_COMMAND_OPTIONS.iter().enumerate() {
+                        ui.selectable_value(&mut self.macro_selected_command, idx, *label);
+                    }
+                });
+            if ui
+                .add_enabled(
+                    self.macro_recorder.is_recording(),
+                    egui::Button::new("Add Command Event / 加入指令事件"),
+                )
+                .clicked()
+            {
+                self.add_macro_command_event();
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.label("Events / 事件");
+        if self.macro_live_events.is_empty() {
+            ui.label("No events recorded yet / 尚未錄製事件");
+        } else {
+            for entry in &self.macro_live_events {
+                ui.label(format!("• {entry}"));
+            }
+        }
+
+        ui.separator();
+        ui.label("Saved macros / 已儲存巨集");
+        if self.macro_store.iter().next().is_none() {
+            ui.label("No macros saved / 尚未保存巨集");
+        } else {
+            for (name, macro_def) in self.macro_store.iter() {
+                let label = format!("{name} ({})", macro_def.events.len());
+                let selected = self
+                    .selected_macro
+                    .as_ref()
+                    .map(|current| current == name)
+                    .unwrap_or(false);
+                if ui.selectable_label(selected, label).clicked() {
+                    self.selected_macro = Some(name.clone());
+                }
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Repeat / 重複次數");
+            self.macro_repeat_count = self.macro_repeat_count.max(1);
+            ui.add(
+                egui::DragValue::new(&mut self.macro_repeat_count)
+                    .clamp_range(1..=20)
+                    .speed(1.0),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.selected_macro.is_some(),
+                    egui::Button::new("Play / 播放"),
+                )
+                .clicked()
+            {
+                self.play_selected_macro();
+            }
+            if ui
+                .add_enabled(
+                    self.selected_macro.is_some(),
+                    egui::Button::new("Delete / 刪除"),
+                )
+                .clicked()
+            {
+                self.delete_selected_macro();
+            }
+        });
+
+        ui.separator();
+        ui.label("Recorder log / 錄製紀錄");
+        if self.macro_messages.is_empty() {
+            ui.label("No messages yet / 尚無紀錄");
+        } else {
+            for entry in self.macro_messages.iter().rev() {
+                ui.label(entry);
+            }
+        }
+    }
+
+    fn render_run_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Run Presets / 執行預設");
+        ui.label("Timeout / 逾時設定");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.run_timeout_enabled, "Enable timeout / 啟用逾時");
+            ui.checkbox(
+                &mut self.run_kill_on_timeout,
+                "Kill on timeout / 逾時後強制終止",
+            );
+        });
+        if self.run_timeout_enabled {
+            self.run_timeout_secs = self.run_timeout_secs.clamp(1, 600);
+            ui.add(
+                egui::DragValue::new(&mut self.run_timeout_secs)
+                    .clamp_range(1..=600)
+                    .speed(1.0)
+                    .suffix(" s"),
+            )
+            .on_hover_text("Max execution time / 最大執行秒數");
+        } else {
+            ui.label("Timeout disabled / 已停用逾時限制");
+        }
+
+        ui.add_space(6.0);
+        ui.label("Notes / 備註");
+        ui.small("Settings apply to all presets in this preview. 正式版需提供每個指令的獨立設定。");
+    }
+
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1341,6 +2015,51 @@ impl RustNotePadApp {
                     }
                 });
         }
+    }
+}
+
+struct AppMacroExecutor<'a> {
+    app: &'a mut RustNotePadApp,
+}
+
+impl<'a> MacroExecutor for AppMacroExecutor<'a> {
+    fn execute_command(&mut self, command_id: &str) -> Result<(), String> {
+        match command_id {
+            "macro.command.uppercase_preview" => {
+                self.app.editor_preview = self.app.editor_preview.to_uppercase();
+                self.app.after_macro_edit();
+                self.app
+                    .push_macro_log("Preview uppercased / 預覽內容已轉成大寫");
+                Ok(())
+            }
+            "macro.command.append_signature" => {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0);
+                let signature =
+                    format!("\n// Macro signature {timestamp} / 巨集簽章 {timestamp}\n");
+                self.app.editor_preview.push_str(&signature);
+                self.app.after_macro_edit();
+                self.app
+                    .push_macro_log("Appended signature / 已附加簽名註解");
+                Ok(())
+            }
+            other => Err(format!("Unhandled command {other} / 未支援指令 {other}")),
+        }
+    }
+
+    fn insert_text(&mut self, text: &str) -> Result<(), String> {
+        self.app.editor_preview.push_str(text);
+        self.app.after_macro_edit();
+        let snippet = if text.len() > 18 {
+            format!("{}…", &text[..18])
+        } else {
+            text.to_string()
+        };
+        self.app
+            .push_macro_log(format!("Inserted \"{snippet}\" / 已插入「{snippet}」"));
+        Ok(())
     }
 }
 

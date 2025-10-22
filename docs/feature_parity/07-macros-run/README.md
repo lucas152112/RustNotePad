@@ -11,20 +11,20 @@
   與輸出主控台整合
 
 ## Status Checklist / 進度檢查清單
-- [ ] `design.md` drafted and reviewed  
-  尚未完成 `design.md` 撰寫與審閱
-- [ ] Macro recorder and player implemented  
-  巨集錄製與播放尚未實作
-- [ ] Run/external tool executor implemented  
-  執行/外部工具執行器尚未實作
-- [ ] Unit tests for macro serialization  
-  巨集序列化單元測試尚未完成
-- [ ] Integration tests for process execution sandbox  
-  進程執行沙箱整合測試尚未完成
+- [x] `design.md` drafted and reviewed  
+  `design.md` 已撰寫並更新
+- [x] Macro recorder and player implemented  
+  巨集錄製與播放已實作
+- [x] Run/external tool executor implemented  
+  執行/外部工具執行器已實作
+- [x] Unit tests for macro serialization  
+  巨集序列化單元測試已完成
+- [x] Integration tests for process execution sandbox  
+  進程執行沙箱整合測試已建立
 - [ ] E2E coverage for macro/run UI  
   巨集/執行 UI 端到端測試尚未覆蓋
-- [ ] `compatibility.md` updated  
-  `compatibility.md` 尚待更新
+- [x] `compatibility.md` updated  
+  `compatibility.md` 已更新
 
 ## Artifacts / 產出清單
 - Design notes: `design.md`  
