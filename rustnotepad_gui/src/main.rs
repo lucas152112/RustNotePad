@@ -1,3 +1,4 @@
+use ab_glyph::FontArc;
 use eframe::{egui, App, Frame, NativeOptions};
 use egui::{
     vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
@@ -20,10 +21,11 @@ use rustnotepad_settings::{
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as IoWrite;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
@@ -55,6 +57,50 @@ struct RunLogEntry {
     stderr_text: String,
     timeout_ms: Option<u64>,
     kill_on_timeout: bool,
+}
+
+fn log_with_level(message: impl Into<String>, level: &str) {
+    let message = message.into();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    let line = format!(
+        "[{level}] {:>10}.{:03} {}",
+        timestamp.as_secs(),
+        timestamp.subsec_millis(),
+        message
+    );
+    eprintln!("{line}");
+    if let Err(err) = append_log_line(&line) {
+        eprintln!(
+            "[WARN] {:>10}.{:03} failed to write log file: {err}",
+            timestamp.as_secs(),
+            timestamp.subsec_millis()
+        );
+    }
+}
+
+fn log_info(message: impl Into<String>) {
+    log_with_level(message, "INFO");
+}
+
+fn log_warn(message: impl Into<String>) {
+    log_with_level(message, "WARN");
+}
+
+fn log_error(message: impl Into<String>) {
+    log_with_level(message, "ERROR");
+}
+
+fn append_log_line(line: &str) -> std::io::Result<()> {
+    let mut base = std::env::current_exe()?;
+    base.pop();
+    base.push("logs");
+    fs::create_dir_all(&base)?;
+    base.push("rustnotepad_gui.log");
+    let mut file = OpenOptions::new().create(true).append(true).open(base)?;
+    writeln!(file, "{line}")?;
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -830,10 +876,36 @@ impl RustNotePadApp {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<_>>();
         let cleared = spec.clear_env;
+        let timeout_desc = spec
+            .timeout_ms
+            .map(|ms| format!("{:.2}s", (ms as f64) / 1000.0))
+            .unwrap_or_else(|| "disabled".to_string());
+        let kill_desc_en = if spec.kill_on_timeout {
+            "kill on timeout"
+        } else {
+            "wait on timeout"
+        };
+        let kill_desc_zh = if spec.kill_on_timeout {
+            "逾時終止"
+        } else {
+            "逾時不中止"
+        };
+        log_info(format!(
+            "Executing run preset '{title}' -> {command} (timeout {timeout_desc}, {kill_desc_en}) / 執行預設「{title}」，指令：{command}（逾時設定：{timeout_desc}，{kill_desc_zh}）"
+        ));
         match RunExecutor::execute(&spec) {
             Ok(result) => {
                 let stdout_text = String::from_utf8_lossy(&result.stdout).into_owned();
                 let stderr_text = String::from_utf8_lossy(&result.stderr).into_owned();
+                let exit_desc = result
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                let timed_out = result.timed_out;
+                let duration_ms = result.duration_ms;
+                let timed_label_en = if timed_out { "timed out" } else { "completed" };
+                let timed_label_zh = if timed_out { "逾時" } else { "完成" };
+                let log_title = title.clone();
                 let entry = RunLogEntry {
                     title,
                     command,
@@ -848,9 +920,15 @@ impl RustNotePadApp {
                 };
                 self.push_run_history(entry);
                 self.run_last_error = None;
+                log_info(format!(
+                    "Run preset '{log_title}' {timed_label_en} with exit {exit_desc} (duration {duration_ms} ms) / 執行預設「{log_title}」{timed_label_zh}，結束碼 {exit_desc}，耗時 {duration_ms} 毫秒"
+                ));
             }
             Err(err) => {
                 self.run_last_error = Some(format!("Execution failed: {err} / 執行失敗：{err}"));
+                log_error(format!(
+                    "Run preset '{title}' failed: {err} / 執行預設「{title}」失敗：{err}"
+                ));
             }
         }
     }
@@ -900,6 +978,10 @@ impl RustNotePadApp {
     fn apply_locale_change(&mut self, index: usize, summaries: &[LocaleSummary]) {
         if let Some(target) = summaries.get(index) {
             if locale_requires_cjk(&target.code) && !self.cjk_font_available {
+                log_warn(format!(
+                    "Blocked locale switch to {} (missing CJK font) / 無法切換語系至 {}（缺少 CJK 字型）",
+                    target.code, target.display_name
+                ));
                 self.font_warning = Some(
                     self.localization
                         .text("fonts.warning.cjk_missing")
@@ -915,6 +997,12 @@ impl RustNotePadApp {
         self.selected_locale = index;
         if let Some(summary) = summaries.get(index) {
             self.status.set_locale(&summary.display_name);
+        }
+        if let Some(summary) = summaries.get(index) {
+            log_info(format!(
+                "Locale switched to {} / 介面語系已切換為 {}",
+                summary.code, summary.display_name
+            ));
         }
         self.sample_editor_content = self.localization.text("sample.editor_preview").into_owned();
         if self.current_document_id == PREVIEW_DOCUMENT_ID {
@@ -1123,9 +1211,13 @@ impl RustNotePadApp {
             }
             self.cjk_font_available = true;
             self.font_warning = None;
+            log_info("CJK fallback font installed / 已載入正體中文字型備援");
         } else if self.font_warning.is_none() {
             self.font_warning = Some(self.text("fonts.warning.cjk_missing").into_owned());
             self.cjk_font_available = false;
+            log_warn(
+                "CJK fallback font missing; UI will stay English / 未載入正體中文字型，介面將維持英文",
+            );
         } else {
             self.cjk_font_available = false;
         }
@@ -2310,6 +2402,27 @@ fn line_number_for_range(text: &str, range: &TextRange) -> usize {
     text[..start].lines().count().saturating_add(1)
 }
 
+fn install_panic_logger() {
+    static PANIC_HOOK: Once = Once::new();
+    PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+                .unwrap_or_else(|| "unknown".to_string());
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic payload unavailable".to_string());
+            log_error(format!(
+                "panic captured at {location}: {payload} / 發生 panic：{payload}（位置：{location}）"
+            ));
+        }));
+    });
+}
+
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -2346,24 +2459,59 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
         ));
     }
 
-    for path in candidates.into_iter().filter(|p| p.exists()) {
-        if let Ok(bytes) = fs::read(&path) {
-            return Some(("cjk_fallback".into(), bytes));
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match fs::read(&path) {
+            Ok(bytes) => match FontArc::try_from_vec(bytes.clone()) {
+                Ok(_) => {
+                    log_info(format!(
+                        "Loaded CJK font from {} / 已載入正體中文字型：{}",
+                        path.display(),
+                        path.display()
+                    ));
+                    return Some(("cjk_fallback".into(), bytes));
+                }
+                Err(err) => log_warn(format!(
+                    "Skipping unsupported font {}: {err} / 字型不支援，已略過：{}",
+                    path.display(),
+                    path.display()
+                )),
+            },
+            Err(err) => log_warn(format!(
+                "Failed to read font {}: {err} / 無法讀取字型檔案 {}：{err}",
+                path.display(),
+                path.display()
+            )),
         }
     }
+    log_warn(
+        "No CJK font found; Traditional Chinese UI may require manual font install / 未找到正體中文可用字型，需手動安裝字型",
+    );
     None
 }
 
 fn main() -> eframe::Result<()> {
+    install_panic_logger();
+    log_info("Starting RustNotePad GUI preview / 啟動 RustNotePad 介面預覽");
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         APP_TITLE,
         options,
         Box::new(|_cc| Box::<RustNotePadApp>::default()),
-    )
+    );
+    if let Err(err) = &result {
+        log_error(format!(
+            "eframe shutdown error: {err} / 介面關閉錯誤：{err}"
+        ));
+    } else {
+        log_info("RustNotePad GUI preview closed cleanly / RustNotePad 介面預覽已正常關閉");
+    }
+    result
 }
 
 #[cfg(test)]

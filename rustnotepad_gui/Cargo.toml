@@ -14,6 +14,7 @@ rustnotepad_highlight = { path = "../crates/highlight" }
 rustnotepad_lsp_client = { path = "../crates/lsp_client" }
 rustnotepad_macros = { path = "../crates/macros" }
 rustnotepad_runexec = { path = "../crates/runexec" }
+ab_glyph = "0.2"
 
 [[bin]]
 name = "rustnotepad"
