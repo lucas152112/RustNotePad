@@ -1,4 +1,5 @@
 use ab_glyph::FontArc;
+use chrono::Local;
 use eframe::{egui, App, Frame, NativeOptions};
 use egui::{
     vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
@@ -61,22 +62,15 @@ struct RunLogEntry {
 
 fn log_with_level(message: impl Into<String>, level: &str) {
     let message = message.into();
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0));
-    let line = format!(
-        "[{level}] {:>10}.{:03} {}",
-        timestamp.as_secs(),
-        timestamp.subsec_millis(),
-        message
-    );
+    let formatted_time = Local::now().format("%Y-%m-%d %H:%M:%S");
+    let file = APP_TITLE;
+    let line = format!("[{level}]{formatted_time} {file} {message}");
     eprintln!("{line}");
     if let Err(err) = append_log_line(&line) {
-        eprintln!(
-            "[WARN] {:>10}.{:03} failed to write log file: {err}",
-            timestamp.as_secs(),
-            timestamp.subsec_millis()
+        let warn_line = format!(
+            "[WARN]{formatted_time} {file} Failed to write log file: {err} / 無法寫入日誌：{err}"
         );
+        eprintln!("{warn_line}");
     }
 }
 

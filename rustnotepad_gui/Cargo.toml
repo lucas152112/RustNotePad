@@ -15,6 +15,7 @@ rustnotepad_lsp_client = { path = "../crates/lsp_client" }
 rustnotepad_macros = { path = "../crates/macros" }
 rustnotepad_runexec = { path = "../crates/runexec" }
 ab_glyph = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [[bin]]
 name = "rustnotepad"

@@ -355,9 +355,12 @@ fn highlight_strings(
         return;
     }
 
-    let bytes = input.as_bytes();
     let mut index = 0;
     while index < input.len() {
+        if !input.is_char_boundary(index) {
+            index += 1;
+            continue;
+        }
         match input[index..].find(&delimiter.start) {
             Some(rel_start) => {
                 let start = index + rel_start;
@@ -369,20 +372,33 @@ fn highlight_strings(
                 let mut cursor = start + delimiter.start.len();
                 let mut end = input.len();
                 while cursor < input.len() {
+                    if !input.is_char_boundary(cursor) {
+                        cursor += 1;
+                        continue;
+                    }
                     if input[cursor..].starts_with(&delimiter.end) {
                         if let Some(escape) = delimiter.escape {
                             if cursor > start + delimiter.start.len() {
-                                let previous = bytes[cursor - 1] as char;
-                                if previous == escape {
-                                    cursor += 1;
-                                    continue;
+                                if let Some(previous) = input[..cursor].chars().next_back() {
+                                    if previous == escape {
+                                        cursor += 1;
+                                        continue;
+                                    }
                                 }
                             }
                         }
                         end = cursor + delimiter.end.len();
                         break;
                     }
-                    cursor += 1;
+                    let step = input[cursor..]
+                        .chars()
+                        .next()
+                        .map(|ch| ch.len_utf8())
+                        .unwrap_or(1);
+                    cursor += step;
+                }
+                if !input.is_char_boundary(end) {
+                    end = input.len();
                 }
                 mark_range(occupied, start..end);
                 tokens.push(HighlightToken {
