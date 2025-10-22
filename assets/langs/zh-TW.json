@@ -1,6 +1,6 @@
 {
   "locale": "zh-TW",
-  "display_name": "繁體中文 (zh-TW)",
+  "display_name": "正體中文 (zh-TW)",
   "strings": {
     "sample.editor_preview": "// RustNotePad 介面預覽\nfn main() {\n    let mut search_engine = SearchEngine::new(\"alpha beta gamma\");\n    let options = SearchOptions::new(\"beta\");\n    if let Some(hit) = search_engine.find(0, &options).expect(\"search\") {\n        println!(\"在位元組 {} 找到結果\", hit.start);\n    }\n}\n",
     "toolbar.workspace_prefix": "工作區",

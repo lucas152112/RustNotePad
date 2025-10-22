@@ -10,7 +10,7 @@
 - Document map renders text lines only (no minimap scaling or syntax colour overlays).  
   文件地圖目前僅渲染文字行，未提供縮放或語法色彩覆層。
 - CJK glyph coverage relies on a user-provided font. Place `NotoSansTC-Regular.otf` (or another Traditional Chinese font) under `assets/fonts/` to avoid tofu glyphs.  
-  CJK 字形覆蓋需使用者自備字體，建議將 `NotoSansTC-Regular.otf`（或其他繁體中文字体）放入 `assets/fonts/` 以避免顯示方塊字。
+  CJK 字形覆蓋需使用者自備字體，建議將 `NotoSansTC-Regular.otf`（或其他正體中文字体）放入 `assets/fonts/` 以避免顯示方塊字。
 
 ## Validation checklist / 驗證檢查清單
 - [x] Tab pin/lock behaviour mirrored in layout state (pending drag/drop)  
