@@ -191,6 +191,29 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
             ],
         ),
         MenuSection::new(
+            "menu.encoding",
+            &[
+                "menu.encoding.encode_ansi",
+                "menu.encoding.encode_utf8",
+                "menu.encoding.encode_utf8_bom",
+                "menu.encoding.encode_ucs2_le",
+                "menu.encoding.encode_ucs2_be",
+                "menu.encoding.convert_ansi",
+                "menu.encoding.convert_utf8",
+            ],
+        ),
+        MenuSection::new(
+            "menu.language",
+            &[
+                "menu.language.auto_detect",
+                "menu.language.english",
+                "menu.language.chinese_traditional",
+                "menu.language.japanese",
+                "menu.language.rust",
+                "menu.language.json",
+            ],
+        ),
+        MenuSection::new(
             "menu.settings",
             &[
                 "menu.settings.preferences",
@@ -198,6 +221,10 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
                 "menu.settings.shortcut_mapper",
                 "menu.settings.edit_popup_menu",
             ],
+        ),
+        MenuSection::new(
+            "menu.tools",
+            &["menu.tools.md5", "menu.tools.sha256", "menu.tools.open_cmd"],
         ),
         MenuSection::new(
             "menu.macro",
