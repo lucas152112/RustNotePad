@@ -327,6 +327,12 @@ impl LocalizationManager {
         self.active
     }
 
+    /// Returns the locale code of the active language.
+    /// （回傳目前啟用語系的代碼字串。）
+    pub fn active_code(&self) -> &str {
+        self.catalogs[self.active].summary.code.as_str()
+    }
+
     /// Exposes available locales (code + display name).
     /// （提供可用語系的代碼與顯示名稱。）
     pub fn locale_summaries(&self) -> Vec<LocaleSummary> {

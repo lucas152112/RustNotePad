@@ -14,6 +14,11 @@ use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, Regex
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
 use rustnotepad_macros::{MacroError, MacroExecutor, MacroPlayer, MacroRecorder, MacroStore};
+use rustnotepad_project::{
+    AutosaveManifest, ProjectNode, ProjectNodeDraft, ProjectNodeId, ProjectNodeKind, ProjectTree,
+    ProjectTreeStore, SessionCaret, SessionScroll, SessionSnapshot, SessionStore, SessionTab,
+    SessionWindow, UnsavedHash,
+};
 use rustnotepad_runexec::{RunExecutor, RunResult, RunSpec, StdinPayload};
 use rustnotepad_settings::{
     Color, LayoutConfig, LocaleSummary, LocalizationManager, PaneLayout, PaneRole, ResolvedPalette,
@@ -36,14 +41,16 @@ const PREVIEW_LANGUAGE_ID: &str = "rust";
 const MAX_MACRO_MESSAGES: usize = 10;
 const MAX_RUN_HISTORY: usize = 6;
 
-static MACRO_COMMAND_OPTIONS: &[(&str, &str)] = &[
+static MACRO_COMMAND_OPTIONS: &[(&str, &str, &str)] = &[
     (
         "macro.command.uppercase_preview",
-        "Uppercase preview text / 將預覽文字轉成大寫",
+        "Uppercase preview text",
+        "將預覽文字轉成大寫",
     ),
     (
         "macro.command.append_signature",
-        "Append signature comment / 新增簽名註解內容",
+        "Append signature comment",
+        "新增簽名註解內容",
     ),
 ];
 
@@ -67,9 +74,7 @@ fn log_with_level(message: impl Into<String>, level: &str) {
     let line = format!("[{level}]{formatted_time} {file} {message}");
     eprintln!("{line}");
     if let Err(err) = append_log_line(&line) {
-        let warn_line = format!(
-            "[WARN]{formatted_time} {file} Failed to write log file: {err} / 無法寫入日誌：{err}"
-        );
+        let warn_line = format!("[WARN]{formatted_time} {file} Failed to write log file: {err}");
         eprintln!("{warn_line}");
     }
 }
@@ -109,35 +114,6 @@ impl MenuSection {
             title_key,
             item_keys,
         }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProjectNode {
-    label: &'static str,
-    path: Option<&'static str>,
-    children: &'static [ProjectNode],
-}
-
-impl ProjectNode {
-    const fn branch(label: &'static str, children: &'static [ProjectNode]) -> Self {
-        Self {
-            label,
-            path: None,
-            children,
-        }
-    }
-
-    const fn leaf(label: &'static str, path: &'static str) -> Self {
-        Self {
-            label,
-            path: Some(path),
-            children: &[],
-        }
-    }
-
-    fn is_leaf(&self) -> bool {
-        self.path.is_some()
     }
 }
 
@@ -265,50 +241,121 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
     ]
 });
 
-const CORE_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("document.rs", "crates/core/src/document.rs"),
-    ProjectNode::leaf("editor.rs", "crates/core/src/editor.rs"),
-    ProjectNode::leaf("search_session.rs", "crates/core/src/search_session.rs"),
-];
+fn build_sample_project_tree() -> ProjectTree {
+    fn add_folder(
+        tree: ProjectTree,
+        parent: ProjectNodeId,
+        name: &str,
+        path: Option<&str>,
+    ) -> (ProjectTree, ProjectNodeId) {
+        let kind = ProjectNodeKind::Folder {
+            path: path.map(PathBuf::from),
+            filters: Vec::new(),
+        };
+        let draft = ProjectNodeDraft::new(name, kind);
+        let (tree, diff) = tree
+            .add_child(parent, draft)
+            .expect("sample tree folder insertion failed");
+        let new_id = *diff
+            .added
+            .first()
+            .expect("sample tree folder id unavailable");
+        (tree, new_id)
+    }
 
-const SEARCH_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("Cargo.toml", "crates/search/Cargo.toml"),
-    ProjectNode::leaf("src/lib.rs", "crates/search/src/lib.rs"),
-];
+    fn add_file(tree: ProjectTree, parent: ProjectNodeId, name: &str, path: &str) -> ProjectTree {
+        let draft = ProjectNodeDraft::new(
+            name,
+            ProjectNodeKind::File {
+                path: PathBuf::from(path),
+            },
+        );
+        let (tree, _) = tree
+            .add_child(parent, draft)
+            .expect("sample tree file insertion failed");
+        tree
+    }
 
-const CRATES_CHILDREN: &[ProjectNode] = &[
-    ProjectNode::branch("core", CORE_FILES),
-    ProjectNode::branch("search", SEARCH_FILES),
-];
+    let tree = ProjectTree::empty("workspace", None);
+    let root_id = tree.root_id();
 
-const FEATURE_PARITY_DOCS: &[ProjectNode] = &[
-    ProjectNode::leaf(
+    let (tree, crates_id) = add_folder(tree, root_id, "crates", Some("crates"));
+    let (tree, core_id) = add_folder(tree, crates_id, "core", Some("crates/core"));
+    let tree = add_file(tree, core_id, "document.rs", "crates/core/src/document.rs");
+    let tree = add_file(tree, core_id, "editor.rs", "crates/core/src/editor.rs");
+    let tree = add_file(
+        tree,
+        core_id,
+        "search_session.rs",
+        "crates/core/src/search_session.rs",
+    );
+
+    let (tree, search_id) = add_folder(tree, crates_id, "search", Some("crates/search"));
+    let tree = add_file(tree, search_id, "Cargo.toml", "crates/search/Cargo.toml");
+    let tree = add_file(tree, search_id, "src/lib.rs", "crates/search/src/lib.rs");
+
+    let (tree, docs_id) = add_folder(tree, root_id, "docs", Some("docs"));
+    let (tree, feature_id) =
+        add_folder(tree, docs_id, "feature_parity", Some("docs/feature_parity"));
+    let tree = add_file(
+        tree,
+        feature_id,
         "03-search-replace/design.md",
         "docs/feature_parity/03-search-replace/design.md",
-    ),
-    ProjectNode::leaf(
+    );
+    let tree = add_file(
+        tree,
+        feature_id,
         "04-view-interface/design.md",
         "docs/feature_parity/04-view-interface/design.md",
-    ),
-];
+    );
 
-const DOCS_CHILDREN: &[ProjectNode] = &[ProjectNode::branch("feature_parity", FEATURE_PARITY_DOCS)];
-
-const TEST_FILES: &[ProjectNode] = &[
-    ProjectNode::leaf("search_workflow.rs", "tests/search_workflow.rs"),
-    ProjectNode::leaf(
+    let (tree, tests_id) = add_folder(tree, root_id, "tests", Some("tests"));
+    let tree = add_file(
+        tree,
+        tests_id,
+        "search_workflow.rs",
+        "tests/search_workflow.rs",
+    );
+    let tree = add_file(
+        tree,
+        tests_id,
         "search_large_workspace.rs",
         "tests/search_large_workspace.rs",
-    ),
-];
+    );
 
-static PROJECT_TREE: Lazy<Vec<ProjectNode>> = Lazy::new(|| {
-    vec![
-        ProjectNode::branch("crates", CRATES_CHILDREN),
-        ProjectNode::branch("docs", DOCS_CHILDREN),
-        ProjectNode::branch("tests", TEST_FILES),
-    ]
-});
+    tree
+}
+
+fn default_workspace_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = env::var_os("APPDATA") {
+            return PathBuf::from(appdata)
+                .join("RustNotePad")
+                .join("Workspaces");
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(xdg_config) = env::var_os("XDG_CONFIG_HOME") {
+            return PathBuf::from(xdg_config)
+                .join("rustnotepad")
+                .join("workspaces");
+        }
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".config")
+                .join("rustnotepad")
+                .join("workspaces");
+        }
+    }
+
+    env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("rustnotepad_workspaces")
+}
 
 struct StatusBarState {
     line: usize,
@@ -390,6 +437,10 @@ struct RustNotePadApp {
     font_warning: Option<String>,
     highlight_registry: LanguageRegistry,
     function_registry: ParserRegistry,
+    project_tree: ProjectTree,
+    project_tree_store: ProjectTreeStore,
+    session_store: SessionStore,
+    workspace_root: PathBuf,
     document_index: Arc<DocumentIndex>,
     lsp_client: Arc<LspClient>,
     autocomplete_engine: CompletionEngine,
@@ -453,8 +504,81 @@ impl Default for RustNotePadApp {
 
         let highlight_registry = LanguageRegistry::with_defaults();
         let function_registry = build_function_registry();
+        let mut initial_editor_content = sample_editor_content.clone();
+        let mut initial_document_id = PREVIEW_DOCUMENT_ID.to_string();
+        let mut initial_language_id = PREVIEW_LANGUAGE_ID.to_string();
+
+        let workspace_root = default_workspace_root();
+        if let Err(err) = fs::create_dir_all(&workspace_root) {
+            log_warn(format!(
+                "Workspace directory creation failed at {}: {err}",
+                workspace_root.display()
+            ));
+        }
+        let project_tree_store = ProjectTreeStore::new(workspace_root.join("project_tree.json"));
+        let project_tree = match project_tree_store.load() {
+            Ok(Some(tree)) => {
+                log_info(format!(
+                    "Loaded project tree from {}",
+                    project_tree_store.path().display()
+                ));
+                tree
+            }
+            Ok(None) => {
+                let tree = build_sample_project_tree();
+                match project_tree_store.save(&tree) {
+                    Ok(()) => log_info(format!(
+                        "Seeded sample project tree at {}",
+                        project_tree_store.path().display()
+                    )),
+                    Err(err) => log_warn(format!("Failed to seed project tree: {err}")),
+                }
+                tree
+            }
+            Err(err) => {
+                log_error(format!("Failed to load project tree: {err}"));
+                build_sample_project_tree()
+            }
+        };
+
+        let session_dir = workspace_root.join("sessions");
+        if let Err(err) = fs::create_dir_all(&session_dir) {
+            log_warn(format!(
+                "Session directory creation failed at {}: {err}",
+                session_dir.display()
+            ));
+        }
+        let session_store = SessionStore::new(
+            session_dir.join("session.json"),
+            session_dir.join("autosave"),
+        );
+        if let Ok(Some(snapshot)) = session_store.load() {
+            if let Some(window) = snapshot.windows.first() {
+                if let Some(tab) = window.tabs.first() {
+                    if let Some(path) = tab.path.as_ref().and_then(|p| p.to_str()) {
+                        initial_document_id = path.to_string();
+                        initial_language_id = language_id_from_path(path).to_string();
+                    } else if let Some(name) = &tab.display_name {
+                        initial_document_id = name.clone();
+                    }
+                    if let Some(hash) = &tab.unsaved_hash {
+                        match session_store.autosave().read_contents(hash) {
+                            Ok(bytes) if !bytes.is_empty() => {
+                                if let Ok(text) = String::from_utf8(bytes) {
+                                    initial_editor_content = text;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(err) => log_warn(format!("Failed to read autosave buffer: {err}")),
+                        }
+                    }
+                }
+            }
+            log_info("Session snapshot restored");
+        }
+
         let document_index = Arc::new(DocumentIndex::new());
-        document_index.update_document(PREVIEW_DOCUMENT_ID, &sample_editor_content);
+        document_index.update_document(&initial_document_id, &initial_editor_content);
         let lsp_client = Arc::new(LspClient::new());
         let mut autocomplete_engine = CompletionEngine::new();
         autocomplete_engine.register_provider(
@@ -508,10 +632,9 @@ impl Default for RustNotePadApp {
                 .with_max_items(40),
         );
         let completion_prefix = "ma".to_string();
-
         status.set_document_language(
             localization
-                .text(language_display_key(PREVIEW_LANGUAGE_ID))
+                .text(language_display_key(&initial_language_id))
                 .into_owned(),
         );
         status.set_locale(&locale_display);
@@ -519,7 +642,7 @@ impl Default for RustNotePadApp {
         let default_macro_name = "Macro 1".to_string();
         let mut app = Self {
             layout,
-            editor_preview: sample_editor_content.clone(),
+            editor_preview: initial_editor_content.clone(),
             bottom_tab_index: active_panel_index,
             selected_locale,
             localization,
@@ -535,13 +658,17 @@ impl Default for RustNotePadApp {
             font_warning: None,
             highlight_registry,
             function_registry,
+            project_tree,
+            project_tree_store,
+            session_store,
+            workspace_root,
             document_index,
             lsp_client,
             autocomplete_engine,
             completion_prefix,
             completion_results: Vec::new(),
-            current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
-            current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
+            current_document_id: initial_document_id.clone(),
+            current_language_id: initial_language_id.clone(),
             preferences: PreferencesState::default(),
             macro_recorder: MacroRecorder::new(),
             macro_store: MacroStore::new(),
@@ -635,6 +762,16 @@ impl RustNotePadApp {
         self.macro_messages.push_back(message.into());
     }
 
+    fn push_macro_log_localized(&mut self, en: &str, zh: &str) {
+        let message = self.localized(en, zh);
+        self.push_macro_log(message);
+    }
+
+    fn push_macro_log_localized_owned(&mut self, en: String, zh: String) {
+        let message = self.localized_owned(en, zh);
+        self.push_macro_log(message);
+    }
+
     fn next_macro_name(&self) -> String {
         let mut index = self.macro_store.iter().count() + 1;
         loop {
@@ -659,12 +796,13 @@ impl RustNotePadApp {
                 self.macro_pending_name = self.next_macro_name();
                 self.macro_live_events.clear();
                 self.macro_input_buffer.clear();
-                self.push_macro_log("Recording started / 已開始錄製");
+                self.push_macro_log_localized("Recording started", "已開始錄製");
             }
             Err(err) => {
-                self.push_macro_log(format!(
-                    "Cannot start recording: {err} / 無法開始錄製：{err}"
-                ));
+                self.push_macro_log_localized_owned(
+                    format!("Cannot start recording: {err}"),
+                    format!("無法開始錄製：{err}"),
+                );
             }
         }
     }
@@ -674,15 +812,15 @@ impl RustNotePadApp {
             self.macro_recorder.cancel();
             self.macro_live_events.clear();
             self.macro_input_buffer.clear();
-            self.push_macro_log("Recording cancelled / 已取消錄製");
+            self.push_macro_log_localized("Recording cancelled", "已取消錄製");
         } else {
-            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            self.push_macro_log_localized("Recorder idle", "錄製器目前未啟動");
         }
     }
 
     fn stop_macro_recording(&mut self) {
         if !self.macro_recorder.is_recording() {
-            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            self.push_macro_log_localized("Recorder idle", "錄製器目前未啟動");
             return;
         }
 
@@ -694,30 +832,36 @@ impl RustNotePadApp {
         match self.macro_recorder.finish(name.clone(), None) {
             Ok(macro_def) => {
                 if macro_def.is_empty() {
-                    self.push_macro_log("Cannot save empty macro / 無法儲存空巨集");
+                    self.push_macro_log_localized("Cannot save empty macro", "無法儲存空巨集");
                 } else if let Err(err) = self.macro_store.insert(macro_def) {
                     match err {
                         MacroError::DuplicateMacroName(existing) => {
-                            self.push_macro_log(format!(
-                                "Macro '{existing}' already exists / 巨集「{existing}」已存在"
-                            ));
+                            self.push_macro_log_localized_owned(
+                                format!("Macro '{existing}' already exists"),
+                                format!("巨集「{existing}」已存在"),
+                            );
                         }
                         other => {
-                            self.push_macro_log(format!(
-                                "Failed to save macro: {other} / 無法儲存巨集：{other}"
-                            ));
+                            self.push_macro_log_localized_owned(
+                                format!("Failed to save macro: {other}"),
+                                format!("無法儲存巨集：{other}"),
+                            );
                         }
                     }
                 } else {
                     self.selected_macro = Some(name.clone());
-                    self.push_macro_log(format!("Saved macro '{name}' / 已儲存巨集「{name}」"));
+                    self.push_macro_log_localized_owned(
+                        format!("Saved macro '{name}'"),
+                        format!("已儲存巨集「{name}」"),
+                    );
                     self.macro_pending_name = self.next_macro_name();
                 }
             }
             Err(err) => {
-                self.push_macro_log(format!(
-                    "Failed to finish recording: {err} / 無法完成錄製：{err}"
-                ));
+                self.push_macro_log_localized_owned(
+                    format!("Failed to finish recording: {err}"),
+                    format!("無法完成錄製：{err}"),
+                );
             }
         }
         self.macro_live_events.clear();
@@ -726,18 +870,19 @@ impl RustNotePadApp {
 
     fn add_macro_text_event(&mut self) {
         if !self.macro_recorder.is_recording() {
-            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            self.push_macro_log_localized("Recorder idle", "錄製器目前未啟動");
             return;
         }
         let text = self.macro_input_buffer.trim();
         if text.is_empty() {
-            self.push_macro_log("Enter text before adding / 請先輸入文字再加入");
+            self.push_macro_log_localized("Enter text before adding", "請先輸入文字再加入");
             return;
         }
         if let Err(err) = self.macro_recorder.record_text(text.to_string()) {
-            self.push_macro_log(format!(
-                "Failed to record text: {err} / 無法記錄文字：{err}"
-            ));
+            self.push_macro_log_localized_owned(
+                format!("Failed to record text: {err}"),
+                format!("無法記錄文字：{err}"),
+            );
             return;
         }
         let preview = if text.len() > 18 {
@@ -746,47 +891,52 @@ impl RustNotePadApp {
             text.to_string()
         };
         self.macro_live_events.push(format!("text:\"{preview}\""));
-        self.push_macro_log(format!(
-            "Recorded text \"{preview}\" / 已記錄文字「{preview}」"
-        ));
+        self.push_macro_log_localized_owned(
+            format!("Recorded text \"{preview}\""),
+            format!("已記錄文字「{preview}」"),
+        );
         self.macro_input_buffer.clear();
     }
 
     fn add_macro_command_event(&mut self) {
         if !self.macro_recorder.is_recording() {
-            self.push_macro_log("Recorder idle / 錄製器目前未啟動");
+            self.push_macro_log_localized("Recorder idle", "錄製器目前未啟動");
             return;
         }
         if MACRO_COMMAND_OPTIONS.is_empty() {
-            self.push_macro_log("No commands registered / 尚未註冊指令");
+            self.push_macro_log_localized("No commands registered", "尚未註冊指令");
             return;
         }
         let max_index = MACRO_COMMAND_OPTIONS.len().saturating_sub(1);
         if self.macro_selected_command > max_index {
             self.macro_selected_command = max_index;
         }
-        let (command_id, label) = MACRO_COMMAND_OPTIONS[self.macro_selected_command];
+        let (command_id, label_en, label_zh) = MACRO_COMMAND_OPTIONS[self.macro_selected_command];
+        let label = self.localized(label_en, label_zh);
         if let Err(err) = self.macro_recorder.record_command(command_id.to_string()) {
-            self.push_macro_log(format!(
-                "Failed to record command: {err} / 無法記錄指令：{err}"
-            ));
+            self.push_macro_log_localized_owned(
+                format!("Failed to record command: {err}"),
+                format!("無法記錄指令：{err}"),
+            );
             return;
         }
         self.macro_live_events.push(format!("command:{command_id}"));
-        self.push_macro_log(format!(
-            "Recorded command '{label}' / 已記錄指令「{label}」"
-        ));
+        self.push_macro_log_localized_owned(
+            format!("Recorded command '{label}'"),
+            format!("已記錄指令「{label}」"),
+        );
     }
 
     fn play_selected_macro(&mut self) {
         let Some(selected) = self.selected_macro.clone() else {
-            self.push_macro_log("Select a macro first / 請先選擇巨集");
+            self.push_macro_log_localized("Select a macro first", "請先選擇巨集");
             return;
         };
         let Some(macro_def) = self.macro_store.get(&selected).cloned() else {
-            self.push_macro_log(format!(
-                "Macro '{selected}' not found / 找不到巨集「{selected}」"
-            ));
+            self.push_macro_log_localized_owned(
+                format!("Macro '{selected}' not found"),
+                format!("找不到巨集「{selected}」"),
+            );
             return;
         };
         let repeat = NonZeroUsize::new(self.macro_repeat_count.max(1))
@@ -794,34 +944,39 @@ impl RustNotePadApp {
         let mut executor = AppMacroExecutor { app: self };
         match MacroPlayer::play(&macro_def, repeat, &mut executor) {
             Ok(_) => {
-                self.push_macro_log(format!(
-                    "Played macro '{selected}' ×{} / 已播放巨集「{selected}」×{}",
-                    repeat.get(),
-                    repeat.get()
-                ));
+                let count = repeat.get();
+                self.push_macro_log_localized_owned(
+                    format!("Played macro '{selected}' ×{count}"),
+                    format!("已播放巨集「{selected}」×{count}"),
+                );
             }
             Err(err) => {
-                self.push_macro_log(format!("Playback failed: {err} / 播放失敗：{err}"));
+                self.push_macro_log_localized_owned(
+                    format!("Playback failed: {err}"),
+                    format!("播放失敗：{err}"),
+                );
             }
         }
     }
 
     fn delete_selected_macro(&mut self) {
         let Some(selected) = self.selected_macro.clone() else {
-            self.push_macro_log("Select a macro first / 請先選擇巨集");
+            self.push_macro_log_localized("Select a macro first", "請先選擇巨集");
             return;
         };
         match self.macro_store.remove(&selected) {
             Ok(_) => {
-                self.push_macro_log(format!(
-                    "Deleted macro '{selected}' / 已刪除巨集「{selected}」"
-                ));
+                self.push_macro_log_localized_owned(
+                    format!("Deleted macro '{selected}'"),
+                    format!("已刪除巨集「{selected}」"),
+                );
                 self.selected_macro = None;
             }
             Err(err) => {
-                self.push_macro_log(format!(
-                    "Failed to delete macro: {err} / 無法刪除巨集：{err}"
-                ));
+                self.push_macro_log_localized_owned(
+                    format!("Failed to delete macro: {err}"),
+                    format!("無法刪除巨集：{err}"),
+                );
             }
         }
     }
@@ -832,9 +987,10 @@ impl RustNotePadApp {
             "menu.macro.stop_recording" => self.stop_macro_recording(),
             "menu.macro.playback" => self.play_selected_macro(),
             _ => {
-                self.push_macro_log(format!(
-                    "Unsupported macro command {item_key} / 未支援的巨集指令 {item_key}"
-                ));
+                self.push_macro_log_localized_owned(
+                    format!("Unsupported macro command {item_key}"),
+                    format!("未支援的巨集指令 {item_key}"),
+                );
             }
         }
     }
@@ -843,8 +999,9 @@ impl RustNotePadApp {
         if let Some((title, spec)) = self.build_run_spec(item_key) {
             self.execute_run_spec(title, spec);
         } else {
-            self.run_last_error = Some(format!(
-                "Unsupported run command {item_key} / 未支援的執行指令 {item_key}"
+            self.run_last_error = Some(self.localized_owned(
+                format!("Unsupported run command {item_key}"),
+                format!("未支援的執行指令 {item_key}"),
             ));
         }
     }
@@ -861,7 +1018,7 @@ impl RustNotePadApp {
                     .with_stdin(StdinPayload::Text("preview-input\n".into()))
                     .with_working_dir("crates/macros");
                 Some((
-                    "Run Macro Preview / 範例執行".to_string(),
+                    self.localized("Run Macro Preview", "範例執行"),
                     self.apply_run_defaults(spec),
                 ))
             }
@@ -870,7 +1027,7 @@ impl RustNotePadApp {
                     .with_args(["-lc", "echo \"Launching Chrome to $RUN_URL\""])
                     .with_env("RUN_URL", "https://www.rust-lang.org/");
                 Some((
-                    "Launch Chrome preset / 模擬啟動 Chrome".to_string(),
+                    self.localized("Launch Chrome preset", "模擬啟動 Chrome"),
                     self.apply_run_defaults(spec),
                 ))
             }
@@ -880,7 +1037,7 @@ impl RustNotePadApp {
                     .clear_env()
                     .with_env("RUN_URL", "https://notepad-plus-plus.org/");
                 Some((
-                    "Launch Firefox preset / 模擬啟動 Firefox".to_string(),
+                    self.localized("Launch Firefox preset", "模擬啟動 Firefox"),
                     self.apply_run_defaults(spec),
                 ))
             }
@@ -911,8 +1068,13 @@ impl RustNotePadApp {
         } else {
             "逾時不中止"
         };
-        log_info(format!(
-            "Executing run preset '{title}' -> {command} (timeout {timeout_desc}, {kill_desc_en}) / 執行預設「{title}」，指令：{command}（逾時設定：{timeout_desc}，{kill_desc_zh}）"
+        log_info(self.localized_owned(
+            format!(
+                "Executing run preset '{title}' -> {command} (timeout {timeout_desc}, {kill_desc_en})"
+            ),
+            format!(
+                "執行預設「{title}」，指令：{command}（逾時設定：{timeout_desc}，{kill_desc_zh}）"
+            ),
         ));
         match RunExecutor::execute(&spec) {
             Ok(result) => {
@@ -941,14 +1103,23 @@ impl RustNotePadApp {
                 };
                 self.push_run_history(entry);
                 self.run_last_error = None;
-                log_info(format!(
-                    "Run preset '{log_title}' {timed_label_en} with exit {exit_desc} (duration {duration_ms} ms) / 執行預設「{log_title}」{timed_label_zh}，結束碼 {exit_desc}，耗時 {duration_ms} 毫秒"
+                log_info(self.localized_owned(
+                    format!(
+                        "Run preset '{log_title}' {timed_label_en} with exit {exit_desc} (duration {duration_ms} ms)"
+                    ),
+                    format!(
+                        "執行預設「{log_title}」{timed_label_zh}，結束碼 {exit_desc}，耗時 {duration_ms} 毫秒"
+                    ),
                 ));
             }
             Err(err) => {
-                self.run_last_error = Some(format!("Execution failed: {err} / 執行失敗：{err}"));
-                log_error(format!(
-                    "Run preset '{title}' failed: {err} / 執行預設「{title}」失敗：{err}"
+                self.run_last_error = Some(self.localized_owned(
+                    format!("Execution failed: {err}"),
+                    format!("執行失敗：{err}"),
+                ));
+                log_error(self.localized_owned(
+                    format!("Run preset '{title}' failed: {err}"),
+                    format!("執行預設「{title}」失敗：{err}"),
                 ));
             }
         }
@@ -981,6 +1152,99 @@ impl RustNotePadApp {
         text
     }
 
+    fn workspace_display_name(&self) -> String {
+        self.workspace_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| self.workspace_root.to_string_lossy().to_string())
+    }
+
+    fn locale_code(&self) -> &str {
+        self.localization.active_code()
+    }
+
+    fn localized(&self, en: &str, zh: &str) -> String {
+        if self.locale_code().starts_with("zh") {
+            zh.to_string()
+        } else {
+            en.to_string()
+        }
+    }
+
+    fn localized_owned(&self, en: String, zh: String) -> String {
+        if self.locale_code().starts_with("zh") {
+            zh
+        } else {
+            en
+        }
+    }
+
+    fn persist_session(&mut self) {
+        let hash = UnsavedHash::from_bytes(self.editor_preview.as_bytes());
+        if let Err(err) = self
+            .session_store
+            .autosave()
+            .write_contents(&hash, self.editor_preview.as_bytes())
+        {
+            log_error(self.localized_owned(
+                format!("Failed to write autosave buffer: {err}"),
+                format!("無法寫入自動儲存內容：{err}"),
+            ));
+            return;
+        }
+
+        let mut manifest = match self.session_store.autosave().load_manifest() {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                log_warn(self.localized_owned(
+                    format!("Failed to load autosave manifest: {err}"),
+                    format!("無法載入自動儲存清單：{err}"),
+                ));
+                AutosaveManifest::default()
+            }
+        };
+        manifest.touch(hash.clone());
+        if let Err(err) = self.session_store.autosave().save_manifest(&manifest) {
+            log_warn(self.localized_owned(
+                format!("Failed to persist autosave manifest: {err}"),
+                format!("無法儲存自動儲存清單：{err}"),
+            ));
+        }
+
+        let mut tab = SessionTab::default();
+        if Path::new(&self.current_document_id).exists() {
+            tab.path = Some(Path::new(&self.current_document_id).to_path_buf());
+        }
+        tab.display_name = Some(self.current_document_id.clone());
+        tab.caret = SessionCaret {
+            line: clamp_to_u32(self.status.line.saturating_sub(1)),
+            column: clamp_to_u32(self.status.column.saturating_sub(1)),
+        };
+        tab.scroll = SessionScroll {
+            top_line: 0,
+            horizontal_offset: 0,
+        };
+        tab.unsaved_hash = Some(hash);
+        tab.dirty_external = false;
+
+        let mut window = SessionWindow::new();
+        window.tabs.push(tab);
+        window.active_tab = Some(0);
+
+        let snapshot = SessionSnapshot::new(vec![window]);
+        match self.session_store.save(&snapshot) {
+            Ok(()) => log_info(self.localized_owned(
+                "Session snapshot saved".to_string(),
+                "工作階段已儲存".to_string(),
+            )),
+            Err(err) => log_error(self.localized_owned(
+                format!("Failed to save session snapshot: {err}"),
+                format!("無法儲存工作階段快照：{err}"),
+            )),
+        }
+    }
+
     fn apply_run_defaults(&self, mut spec: RunSpec) -> RunSpec {
         if self.run_timeout_enabled {
             let secs = self.run_timeout_secs.max(1);
@@ -999,9 +1263,12 @@ impl RustNotePadApp {
     fn apply_locale_change(&mut self, index: usize, summaries: &[LocaleSummary]) {
         if let Some(target) = summaries.get(index) {
             if locale_requires_cjk(&target.code) && !self.cjk_font_available {
-                log_warn(format!(
-                    "Blocked locale switch to {} (missing CJK font) / 無法切換語系至 {}（缺少 CJK 字型）",
-                    target.code, target.display_name
+                log_warn(self.localized_owned(
+                    format!(
+                        "Blocked locale switch to {} (missing CJK font)",
+                        target.code
+                    ),
+                    format!("無法切換語系至 {}（缺少 CJK 字型）", target.display_name),
                 ));
                 self.font_warning = Some(
                     self.localization
@@ -1020,9 +1287,9 @@ impl RustNotePadApp {
             self.status.set_locale(&summary.display_name);
         }
         if let Some(summary) = summaries.get(index) {
-            log_info(format!(
-                "Locale switched to {} / 介面語系已切換為 {}",
-                summary.code, summary.display_name
+            log_info(self.localized_owned(
+                format!("Locale switched to {}", summary.code),
+                format!("介面語系已切換為 {}", summary.display_name),
             ));
         }
         self.sample_editor_content = self.localization.text("sample.editor_preview").into_owned();
@@ -1232,13 +1499,14 @@ impl RustNotePadApp {
             }
             self.cjk_font_available = true;
             self.font_warning = None;
-            log_info("CJK fallback font installed / 已載入正體中文字型備援");
+            log_info(self.localized("CJK fallback font installed", "已載入正體中文字型備援"));
         } else if self.font_warning.is_none() {
             self.font_warning = Some(self.text("fonts.warning.cjk_missing").into_owned());
             self.cjk_font_available = false;
-            log_warn(
-                "CJK fallback font missing; UI will stay English / 未載入正體中文字型，介面將維持英文",
-            );
+            log_warn(self.localized(
+                "CJK fallback font missing; UI will stay English",
+                "未載入正體中文字型，介面將維持英文",
+            ));
         } else {
             self.cjk_font_available = false;
         }
@@ -1294,7 +1562,7 @@ impl RustNotePadApp {
                     let workspace_label = format!(
                         "{}: {}",
                         self.text("toolbar.workspace_prefix"),
-                        "rustnotepad"
+                        self.workspace_display_name()
                     );
                     ui.label(RichText::new(workspace_label).strong());
                     ui.separator();
@@ -1339,8 +1607,47 @@ impl RustNotePadApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading(self.text("panel.project.title"));
                     ui.separator();
-                    for node in PROJECT_TREE.iter() {
-                        self.render_project_node(ui, node, 0);
+                    if ui
+                        .button(self.localized("Reload Tree", "重新載入專案樹"))
+                        .on_hover_text(
+                            self.localized("Reload project tree from disk", "從磁碟重新載入專案樹"),
+                        )
+                        .clicked()
+                    {
+                        match self.project_tree_store.load() {
+                            Ok(Some(tree)) => {
+                                self.project_tree = tree;
+                                log_info(self.localized_owned(
+                                    "Project tree reloaded".to_string(),
+                                    "專案樹已重新載入".to_string(),
+                                ));
+                            }
+                            Ok(None) => log_warn(self.localized_owned(
+                                "Project tree file missing".to_string(),
+                                "專案樹檔案不存在".to_string(),
+                            )),
+                            Err(err) => log_error(format!(
+                                "{}",
+                                self.localized_owned(
+                                    format!("Failed to reload project tree: {err}"),
+                                    format!("無法重新載入專案樹：{err}"),
+                                )
+                            )),
+                        }
+                    }
+                    if ui
+                        .button(self.localized("Save Session", "儲存工作階段"))
+                        .on_hover_text(
+                            self.localized("Flush session snapshot to disk", "將工作階段寫入磁碟"),
+                        )
+                        .clicked()
+                    {
+                        self.persist_session();
+                    }
+                    ui.add_space(6.0);
+                    let root_children = self.project_tree.root.children.clone();
+                    for child in root_children.iter() {
+                        self.render_project_node(ui, child, 0);
                     }
                     ui.add_space(10.0);
                     ui.separator();
@@ -1433,7 +1740,7 @@ impl RustNotePadApp {
                             ui.separator();
                         }
                         if self.run_history.is_empty() {
-                            ui.label("No run history yet / 尚無執行紀錄");
+                            ui.label(self.localized("No run history yet", "尚無執行紀錄"));
                         } else {
                             for entry in self.run_history.iter() {
                                 ui.group(|ui| {
@@ -1442,22 +1749,28 @@ impl RustNotePadApp {
                                         .exit_code
                                         .map(|code| code.to_string())
                                         .unwrap_or_else(|| "signal".to_string());
-                                    ui.label(format!(
-                                        "{}\nExit: {} / 結束碼：{} | Duration: {} ms",
-                                        entry.title, exit_code, exit_code, entry.result.duration_ms
+                                    ui.label(self.localized_owned(
+                                        format!(
+                                            "{}\nExit: {} | Duration: {} ms",
+                                            entry.title, exit_code, entry.result.duration_ms
+                                        ),
+                                        format!(
+                                            "{}\n結束碼：{}｜耗時 {} 毫秒",
+                                            entry.title, exit_code, entry.result.duration_ms
+                                        ),
                                     ));
-                                    ui.label(format!(
-                                        "Command: {} / 指令：{}",
-                                        entry.command, entry.command
+                                    ui.label(self.localized_owned(
+                                        format!("Command: {}", entry.command),
+                                        format!("指令：{}", entry.command),
                                     ));
                                     let workdir = entry
                                         .working_dir
                                         .as_ref()
                                         .map(|path| path.display().to_string())
                                         .unwrap_or_else(|| "-".to_string());
-                                    ui.label(format!(
-                                        "Workdir: {} / 工作目錄：{}",
-                                        workdir, workdir
+                                    ui.label(self.localized_owned(
+                                        format!("Workdir: {}", workdir),
+                                        format!("工作目錄：{}", workdir),
                                     ));
                                     let env_text = if entry.env.is_empty() {
                                         "-".to_string()
@@ -1469,57 +1782,72 @@ impl RustNotePadApp {
                                             .collect::<Vec<_>>()
                                             .join(", ")
                                     };
-                                    ui.label(format!(
-                                        "Env overrides: {} / 環境覆寫：{}",
-                                        env_text, env_text
+                                    ui.label(self.localized_owned(
+                                        format!("Env overrides: {}", env_text),
+                                        format!("環境覆寫：{}", env_text),
                                     ));
-                                    let cleared = if entry.cleared_env {
-                                        "yes / 是"
-                                    } else {
-                                        "no / 否"
-                                    };
-                                    ui.label(format!("Cleared env: {cleared}"));
-                                    let timeout_desc = entry
+                                    let cleared_en = if entry.cleared_env { "yes" } else { "no" };
+                                    let cleared_zh = if entry.cleared_env { "是" } else { "否" };
+                                    ui.label(self.localized_owned(
+                                        format!("Cleared env: {cleared_en}"),
+                                        format!("已清除環境變數：{cleared_zh}"),
+                                    ));
+                                    let timeout_desc_en = entry
                                         .timeout_ms
                                         .map(|ms| format!("{:.2} s", (ms as f64) / 1000.0))
                                         .unwrap_or_else(|| "disabled".to_string());
-                                    ui.label(format!(
-                                        "Timeout: {} / 逾時：{}",
-                                        timeout_desc, timeout_desc
+                                    let timeout_desc_zh = entry
+                                        .timeout_ms
+                                        .map(|ms| format!("{:.2} 秒", (ms as f64) / 1000.0))
+                                        .unwrap_or_else(|| "已停用".to_string());
+                                    ui.label(self.localized_owned(
+                                        format!("Timeout: {timeout_desc_en}"),
+                                        format!("逾時：{timeout_desc_zh}"),
                                     ));
-                                    let kill_desc = if entry.kill_on_timeout {
-                                        "yes / 是"
-                                    } else {
-                                        "no / 否"
-                                    };
-                                    ui.label(format!(
-                                        "Kill on timeout: {kill_desc} / 逾時後終止：{kill_desc}"
+                                    let kill_desc_en =
+                                        if entry.kill_on_timeout { "yes" } else { "no" };
+                                    let kill_desc_zh =
+                                        if entry.kill_on_timeout { "是" } else { "否" };
+                                    ui.label(self.localized_owned(
+                                        format!("Kill on timeout: {kill_desc_en}"),
+                                        format!("逾時後終止：{kill_desc_zh}"),
                                     ));
                                     if entry.result.timed_out {
                                         ui.colored_label(
                                             Color32::from_rgb(239, 68, 68),
-                                            "Timed out / 已逾時",
+                                            self.localized("Timed out", "已逾時"),
                                         );
                                     }
 
-                                    egui::CollapsingHeader::new("stdout / 標準輸出")
-                                        .default_open(false)
-                                        .show(ui, |ui| {
-                                            if entry.stdout_text.trim().is_empty() {
-                                                ui.label("No stdout output / 無標準輸出");
-                                            } else {
-                                                ui.code(entry.stdout_text.clone());
-                                            }
-                                        });
-                                    egui::CollapsingHeader::new("stderr / 標準錯誤")
-                                        .default_open(false)
-                                        .show(ui, |ui| {
-                                            if entry.stderr_text.trim().is_empty() {
-                                                ui.label("No stderr output / 無標準錯誤輸出");
-                                            } else {
-                                                ui.code(entry.stderr_text.clone());
-                                            }
-                                        });
+                                    egui::CollapsingHeader::new(
+                                        self.localized("stdout", "標準輸出"),
+                                    )
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        if entry.stdout_text.trim().is_empty() {
+                                            ui.label(
+                                                self.localized("No stdout output", "無標準輸出"),
+                                            );
+                                        } else {
+                                            ui.code(entry.stdout_text.clone());
+                                        }
+                                    });
+                                    egui::CollapsingHeader::new(
+                                        self.localized("stderr", "標準錯誤"),
+                                    )
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        if entry.stderr_text.trim().is_empty() {
+                                            ui.label(
+                                                self.localized(
+                                                    "No stderr output",
+                                                    "無標準錯誤輸出",
+                                                ),
+                                            );
+                                        } else {
+                                            ui.code(entry.stderr_text.clone());
+                                        }
+                                    });
                                 });
                             }
                         }
@@ -1853,11 +2181,11 @@ impl RustNotePadApp {
     }
 
     fn render_macro_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Macro Recorder / 巨集錄製器");
+        ui.heading(self.localized("Macro Recorder", "巨集錄製器"));
         let status_text = if self.macro_recorder.is_recording() {
-            "Status: Recording / 狀態：錄製中"
+            self.localized("Status: Recording", "狀態：錄製中")
         } else {
-            "Status: Idle / 狀態：待命"
+            self.localized("Status: Idle", "狀態：待命")
         };
         ui.label(status_text);
 
@@ -1865,7 +2193,7 @@ impl RustNotePadApp {
             if ui
                 .add_enabled(
                     !self.macro_recorder.is_recording(),
-                    egui::Button::new("Start / 開始"),
+                    egui::Button::new(self.localized("Start", "開始")),
                 )
                 .clicked()
             {
@@ -1874,7 +2202,7 @@ impl RustNotePadApp {
             if ui
                 .add_enabled(
                     self.macro_recorder.is_recording(),
-                    egui::Button::new("Stop / 停止"),
+                    egui::Button::new(self.localized("Stop", "停止")),
                 )
                 .clicked()
             {
@@ -1883,7 +2211,7 @@ impl RustNotePadApp {
             if ui
                 .add_enabled(
                     self.macro_recorder.is_recording(),
-                    egui::Button::new("Cancel / 取消"),
+                    egui::Button::new(self.localized("Cancel", "取消")),
                 )
                 .clicked()
             {
@@ -1892,19 +2220,17 @@ impl RustNotePadApp {
         });
 
         ui.add_space(6.0);
-        ui.label("Macro name / 巨集名稱");
+        ui.label(self.localized("Macro name", "巨集名稱"));
         ui.text_edit_singleline(&mut self.macro_pending_name);
 
         ui.add_space(6.0);
-        ui.label("Insert text / 插入文字");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.macro_input_buffer)
-                .hint_text("Enter text to record / 輸入要錄製的文字"),
-        );
+        ui.label(self.localized("Insert text", "插入文字"));
+        let text_hint = self.localized("Enter text to record", "輸入要錄製的文字");
+        ui.add(egui::TextEdit::singleline(&mut self.macro_input_buffer).hint_text(text_hint));
         if ui
             .add_enabled(
                 self.macro_recorder.is_recording() && !self.macro_input_buffer.trim().is_empty(),
-                egui::Button::new("Add Text Event / 加入文字事件"),
+                egui::Button::new(self.localized("Add Text Event", "加入文字事件")),
             )
             .clicked()
         {
@@ -1912,24 +2238,26 @@ impl RustNotePadApp {
         }
 
         ui.add_space(6.0);
-        ui.label("Command / 指令");
+        ui.label(self.localized("Command", "指令"));
         if !MACRO_COMMAND_OPTIONS.is_empty() {
             let max_index = MACRO_COMMAND_OPTIONS.len().saturating_sub(1);
             if self.macro_selected_command > max_index {
                 self.macro_selected_command = max_index;
             }
-            let current_label = MACRO_COMMAND_OPTIONS[self.macro_selected_command].1;
+            let (_, label_en, label_zh) = MACRO_COMMAND_OPTIONS[self.macro_selected_command];
+            let current_label = self.localized(label_en, label_zh);
             egui::ComboBox::from_id_source("macro_command_combo")
                 .selected_text(current_label)
                 .show_ui(ui, |ui| {
-                    for (idx, (_, label)) in MACRO_COMMAND_OPTIONS.iter().enumerate() {
-                        ui.selectable_value(&mut self.macro_selected_command, idx, *label);
+                    for (idx, (_, label_en, label_zh)) in MACRO_COMMAND_OPTIONS.iter().enumerate() {
+                        let label = self.localized(label_en, label_zh);
+                        ui.selectable_value(&mut self.macro_selected_command, idx, label);
                     }
                 });
             if ui
                 .add_enabled(
                     self.macro_recorder.is_recording(),
-                    egui::Button::new("Add Command Event / 加入指令事件"),
+                    egui::Button::new(self.localized("Add Command Event", "加入指令事件")),
                 )
                 .clicked()
             {
@@ -1938,9 +2266,9 @@ impl RustNotePadApp {
         }
 
         ui.add_space(6.0);
-        ui.label("Events / 事件");
+        ui.label(self.localized("Events", "事件"));
         if self.macro_live_events.is_empty() {
-            ui.label("No events recorded yet / 尚未錄製事件");
+            ui.label(self.localized("No events recorded yet", "尚未錄製事件"));
         } else {
             for entry in &self.macro_live_events {
                 ui.label(format!("• {entry}"));
@@ -1948,9 +2276,9 @@ impl RustNotePadApp {
         }
 
         ui.separator();
-        ui.label("Saved macros / 已儲存巨集");
+        ui.label(self.localized("Saved macros", "已儲存巨集"));
         if self.macro_store.iter().next().is_none() {
-            ui.label("No macros saved / 尚未保存巨集");
+            ui.label(self.localized("No macros saved", "尚未保存巨集"));
         } else {
             for (name, macro_def) in self.macro_store.iter() {
                 let label = format!("{name} ({})", macro_def.events.len());
@@ -1967,7 +2295,7 @@ impl RustNotePadApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label("Repeat / 重複次數");
+            ui.label(self.localized("Repeat", "重複次數"));
             self.macro_repeat_count = self.macro_repeat_count.max(1);
             ui.add(
                 egui::DragValue::new(&mut self.macro_repeat_count)
@@ -1980,7 +2308,7 @@ impl RustNotePadApp {
             if ui
                 .add_enabled(
                     self.selected_macro.is_some(),
-                    egui::Button::new("Play / 播放"),
+                    egui::Button::new(self.localized("Play", "播放")),
                 )
                 .clicked()
             {
@@ -1989,7 +2317,7 @@ impl RustNotePadApp {
             if ui
                 .add_enabled(
                     self.selected_macro.is_some(),
-                    egui::Button::new("Delete / 刪除"),
+                    egui::Button::new(self.localized("Delete", "刪除")),
                 )
                 .clicked()
             {
@@ -1998,9 +2326,9 @@ impl RustNotePadApp {
         });
 
         ui.separator();
-        ui.label("Recorder log / 錄製紀錄");
+        ui.label(self.localized("Recorder log", "錄製紀錄"));
         if self.macro_messages.is_empty() {
-            ui.label("No messages yet / 尚無紀錄");
+            ui.label(self.localized("No messages yet", "尚無紀錄"));
         } else {
             for entry in self.macro_messages.iter().rev() {
                 ui.label(entry);
@@ -2009,31 +2337,38 @@ impl RustNotePadApp {
     }
 
     fn render_run_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Run Presets / 執行預設");
-        ui.label("Timeout / 逾時設定");
+        ui.heading(self.localized("Run Presets", "執行預設"));
+        ui.label(self.localized("Timeout", "逾時設定"));
+        let enable_timeout_label = self.localized("Enable timeout", "啟用逾時");
+        let kill_on_timeout_label = self.localized("Kill on timeout", "逾時後強制終止");
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.run_timeout_enabled, "Enable timeout / 啟用逾時");
-            ui.checkbox(
-                &mut self.run_kill_on_timeout,
-                "Kill on timeout / 逾時後強制終止",
-            );
+            ui.checkbox(&mut self.run_timeout_enabled, enable_timeout_label.clone());
+            ui.checkbox(&mut self.run_kill_on_timeout, kill_on_timeout_label.clone());
         });
         if self.run_timeout_enabled {
             self.run_timeout_secs = self.run_timeout_secs.clamp(1, 600);
+            let suffix = if self.locale_code().starts_with("zh") {
+                " 秒"
+            } else {
+                " s"
+            };
             ui.add(
                 egui::DragValue::new(&mut self.run_timeout_secs)
                     .clamp_range(1..=600)
                     .speed(1.0)
-                    .suffix(" s"),
+                    .suffix(suffix),
             )
-            .on_hover_text("Max execution time / 最大執行秒數");
+            .on_hover_text(self.localized("Max execution time", "最大執行秒數"));
         } else {
-            ui.label("Timeout disabled / 已停用逾時限制");
+            ui.label(self.localized("Timeout disabled", "已停用逾時限制"));
         }
 
         ui.add_space(6.0);
-        ui.label("Notes / 備註");
-        ui.small("Settings apply to all presets in this preview. 正式版需提供每個指令的獨立設定。");
+        ui.label(self.localized("Notes", "備註"));
+        ui.small(self.localized(
+            "Settings apply to all presets in this preview. Production builds will allow per-command overrides.",
+            "此預覽版設定會套用到所有預設指令，正式版會提供每個指令的獨立設定。",
+        ));
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
@@ -2108,25 +2443,32 @@ impl RustNotePadApp {
 
     fn render_project_node(&mut self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
         let indent = "    ".repeat(depth);
-        if node.is_leaf() {
-            let label = format!("{indent}{}", node.label);
-            if ui
-                .selectable_label(false, label)
-                .on_hover_text(self.text("explorer.open_document_hover").to_string())
-                .clicked()
-            {
-                if let Some(path) = node.path {
-                    self.open_document(path, node.label);
+        match &node.kind {
+            ProjectNodeKind::File { path } => {
+                let label = format!("{indent}{}", node.name);
+                let path_display = path.to_string_lossy();
+                if ui
+                    .selectable_label(false, label)
+                    .on_hover_text(self.text("explorer.open_document_hover").to_string())
+                    .clicked()
+                {
+                    self.open_document(path_display.as_ref(), &node.name);
                 }
             }
-        } else {
-            egui::CollapsingHeader::new(format!("{indent}{}", node.label))
-                .default_open(depth < 2)
-                .show(ui, |ui| {
-                    for child in node.children.iter() {
-                        self.render_project_node(ui, child, depth + 1);
-                    }
-                });
+            ProjectNodeKind::Folder { .. } => {
+                let label = format!("{indent}{}", node.name);
+                egui::CollapsingHeader::new(label)
+                    .default_open(depth < 2)
+                    .show(ui, |ui| {
+                        for child in node.children.iter() {
+                            self.render_project_node(ui, child, depth + 1);
+                        }
+                    });
+            }
+            ProjectNodeKind::Virtual { subtype, .. } => {
+                let label = format!("{indent}{} ({subtype})", node.name);
+                ui.label(RichText::new(label).color(color32_from_color(self.palette.editor_text)));
+            }
         }
     }
 }
@@ -2142,7 +2484,7 @@ impl<'a> MacroExecutor for AppMacroExecutor<'a> {
                 self.app.editor_preview = self.app.editor_preview.to_uppercase();
                 self.app.after_macro_edit();
                 self.app
-                    .push_macro_log("Preview uppercased / 預覽內容已轉成大寫");
+                    .push_macro_log_localized("Preview uppercased", "預覽內容已轉成大寫");
                 Ok(())
             }
             "macro.command.append_signature" => {
@@ -2150,15 +2492,20 @@ impl<'a> MacroExecutor for AppMacroExecutor<'a> {
                     .duration_since(UNIX_EPOCH)
                     .map(|duration| duration.as_secs())
                     .unwrap_or(0);
-                let signature =
-                    format!("\n// Macro signature {timestamp} / 巨集簽章 {timestamp}\n");
+                let signature = self.app.localized_owned(
+                    format!("\n// Macro signature {timestamp}\n"),
+                    format!("\n// 巨集簽章 {timestamp}\n"),
+                );
                 self.app.editor_preview.push_str(&signature);
                 self.app.after_macro_edit();
                 self.app
-                    .push_macro_log("Appended signature / 已附加簽名註解");
+                    .push_macro_log_localized("Appended signature", "已附加簽名註解");
                 Ok(())
             }
-            other => Err(format!("Unhandled command {other} / 未支援指令 {other}")),
+            other => Err(self.app.localized_owned(
+                format!("Unhandled command {other}"),
+                format!("未支援指令 {other}"),
+            )),
         }
     }
 
@@ -2170,8 +2517,10 @@ impl<'a> MacroExecutor for AppMacroExecutor<'a> {
         } else {
             text.to_string()
         };
-        self.app
-            .push_macro_log(format!("Inserted \"{snippet}\" / 已插入「{snippet}」"));
+        self.app.push_macro_log_localized_owned(
+            format!("Inserted \"{snippet}\""),
+            format!("已插入「{snippet}」"),
+        );
         Ok(())
     }
 }
@@ -2189,6 +2538,12 @@ impl App for RustNotePadApp {
         self.show_status_bar(ctx);
         self.show_editor_area(ctx);
         self.render_settings_window(ctx);
+    }
+}
+
+impl Drop for RustNotePadApp {
+    fn drop(&mut self) {
+        self.persist_session();
     }
 }
 
@@ -2408,6 +2763,10 @@ fn locale_requires_cjk(code: &str) -> bool {
         || normalised == "zh-cn"
 }
 
+fn clamp_to_u32(value: usize) -> u32 {
+    value.min(u32::MAX as usize) as u32
+}
+
 fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
     let trimmed = snippet.trim();
     if trimmed.chars().count() <= max_chars {
@@ -2437,9 +2796,7 @@ fn install_panic_logger() {
                 .map(|s| s.to_string())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic payload unavailable".to_string());
-            log_error(format!(
-                "panic captured at {location}: {payload} / 發生 panic：{payload}（位置：{location}）"
-            ));
+            log_error(format!("panic captured at {location}: {payload}"));
         }));
     });
 }
@@ -2487,35 +2844,24 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
         match fs::read(&path) {
             Ok(bytes) => match FontArc::try_from_vec(bytes.clone()) {
                 Ok(_) => {
-                    log_info(format!(
-                        "Loaded CJK font from {} / 已載入正體中文字型：{}",
-                        path.display(),
-                        path.display()
-                    ));
+                    log_info(format!("Loaded CJK font from {}", path.display()));
                     return Some(("cjk_fallback".into(), bytes));
                 }
                 Err(err) => log_warn(format!(
-                    "Skipping unsupported font {}: {err} / 字型不支援，已略過：{}",
-                    path.display(),
+                    "Skipping unsupported font {}: {err}",
                     path.display()
                 )),
             },
-            Err(err) => log_warn(format!(
-                "Failed to read font {}: {err} / 無法讀取字型檔案 {}：{err}",
-                path.display(),
-                path.display()
-            )),
+            Err(err) => log_warn(format!("Failed to read font {}: {err}", path.display())),
         }
     }
-    log_warn(
-        "No CJK font found; Traditional Chinese UI may require manual font install / 未找到正體中文可用字型，需手動安裝字型",
-    );
+    log_warn("No CJK font found; Traditional Chinese UI may require manual font install");
     None
 }
 
 fn main() -> eframe::Result<()> {
     install_panic_logger();
-    log_info("Starting RustNotePad GUI preview / 啟動 RustNotePad 介面預覽");
+    log_info("Starting RustNotePad GUI preview");
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]),
         ..Default::default()
@@ -2526,11 +2872,9 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Box::<RustNotePadApp>::default()),
     );
     if let Err(err) = &result {
-        log_error(format!(
-            "eframe shutdown error: {err} / 介面關閉錯誤：{err}"
-        ));
+        log_error(format!("eframe shutdown error: {err}"));
     } else {
-        log_info("RustNotePad GUI preview closed cleanly / RustNotePad 介面預覽已正常關閉");
+        log_info("RustNotePad GUI preview closed cleanly");
     }
     result
 }

@@ -2658,6 +2658,7 @@ dependencies = [
  "rustnotepad_highlight",
  "rustnotepad_lsp_client",
  "rustnotepad_macros",
+ "rustnotepad_project",
  "rustnotepad_runexec",
  "rustnotepad_settings",
 ]
@@ -2687,6 +2688,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "rustnotepad_project"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
