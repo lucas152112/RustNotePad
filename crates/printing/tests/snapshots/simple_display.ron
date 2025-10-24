@@ -1,0 +1,67 @@
+(
+    commands: [
+        /*[0]*/ (
+            type: "GlyphRun",
+            text: "fn",
+            font_family: "JetBrains Mono",
+            font_size_pt: 11.0,
+            x: 36.0,
+            y: 36.0,
+            color: (
+                r: 0.9,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            ),
+            background: None,
+        ),
+        /*[1]*/ (
+            type: "GlyphRun",
+            text: "main",
+            font_family: "JetBrains Mono",
+            font_size_pt: 11.0,
+            x: 57.0,
+            y: 36.0,
+            color: (
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            ),
+            background: None,
+        ),
+        /*[2]*/ (
+            type: "BackgroundRect",
+            x: 64.0,
+            y: 50.0,
+            width: 49.0,
+            height: 14.0,
+            color: (
+                r: 0.95,
+                g: 0.95,
+                b: 0.7,
+                a: 1.0,
+            ),
+        ),
+        /*[3]*/ (
+            type: "GlyphRun",
+            text: "println",
+            font_family: "JetBrains Mono",
+            font_size_pt: 11.0,
+            x: 64.0,
+            y: 50.0,
+            color: (
+                r: 0.8,
+                g: 0.4,
+                b: 0.1,
+                a: 1.0,
+            ),
+            background: Some((
+                r: 0.95,
+                g: 0.95,
+                b: 0.7,
+                a: 1.0,
+            )),
+        ),
+    ],
+)

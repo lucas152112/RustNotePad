@@ -1,0 +1,21 @@
+(
+    lines: [
+        "fn main() {",
+        "    println!(\"hello world\");",
+        "",
+        "// comment",
+        "}",
+        "let x = 42;",
+        "let y = x + 1;",
+        "#include <stdio.h>",
+        "int main(void) {",
+        "    return 0;",
+        "}",
+        "",
+    ],
+    expected_ranges: [
+        (0, 5),
+        (5, 10),
+        (10, 12),
+    ],
+)

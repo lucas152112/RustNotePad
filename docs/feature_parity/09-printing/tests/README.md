@@ -29,3 +29,7 @@
   `cargo test --package printing`
 - Snapshot comparisons via reference PDFs  
   透過參考 PDF 進行快照比對
+- `MockPlatformAdapter` captures spooled pages for unit assertions  
+  `MockPlatformAdapter` 可攔截送列資料以利單元測試斷言
+- RON-based display-list snapshots auto-bootstrap (`tests/snapshots/`)  
+  以 RON 格式對顯示清單建立快照（`tests/snapshots/` 自動建立基準檔）

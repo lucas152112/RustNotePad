@@ -1,8 +1,8 @@
 # Compatibility Notes – Feature 3.9（相容性備註 – 功能 3.9）
 
 ## Known differences / 已知差異
-- None yet.  
-  尚無。
+- Header/footer templating supports additional `&o` token for encoding metadata (Notepad++ omits this token; output remains backward-compatible).  
+  頁首/頁尾模板新增 `&o` 代碼以顯示編碼資訊（Notepad++ 無此代碼；輸出具向後相容性）。
 
 ## Validation checklist / 驗證檢查清單
 - [ ] Output parity with Notepad++ sample documents  

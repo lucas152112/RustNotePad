@@ -9,20 +9,20 @@
   列印機組態持久化
 
 ## Status Checklist / 進度檢查清單
-- [ ] `design.md` drafted and reviewed  
-  尚未完成 `design.md` 撰寫與審閱
+- [x] `design.md` drafted and reviewed  
+  已完成 `design.md` 初稿並通過自我檢視
 - [ ] Printing pipeline implemented  
-  列印管線尚未實作
+  列印管線尚未實作（已建立 crate 骨架、模板引擎與 SimplePaginator highlight 流水線）
 - [ ] Preview UI implemented  
   預覽 UI 尚未實作
-- [ ] Unit tests for pagination engine  
-  分頁引擎的單元測試尚未完成
+- [x] Unit tests for pagination engine  
+  已完成 SimplePaginator 分頁與語法著色覆蓋的單元測試
 - [ ] Integration tests against PDF output  
   PDF 輸出的整合測試尚未完成
 - [ ] E2E validation with real printers (platform matrix)  
   實體印表機的端到端驗證尚未執行（跨平台）
-- [ ] `compatibility.md` updated  
-  `compatibility.md` 尚待更新
+- [x] `compatibility.md` updated  
+  已補充 `&o` 代碼等差異紀錄
 
 ## Artifacts / 產出清單
 - Design notes: `design.md`  
