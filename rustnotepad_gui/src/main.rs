@@ -463,6 +463,16 @@ struct RustNotePadApp {
     run_timeout_enabled: bool,
     run_timeout_secs: u64,
     run_kill_on_timeout: bool,
+    show_open_dialog: bool,
+    open_dialog_path: String,
+    open_dialog_error: Option<String>,
+    show_save_as_dialog: bool,
+    save_dialog_path: String,
+    save_dialog_error: Option<String>,
+    current_document_path: Option<PathBuf>,
+    document_dirty: bool,
+    untitled_counter: usize,
+    pending_exit: bool,
 }
 
 impl Default for RustNotePadApp {
@@ -684,6 +694,20 @@ impl Default for RustNotePadApp {
             run_timeout_enabled: true,
             run_timeout_secs: 2,
             run_kill_on_timeout: true,
+            show_open_dialog: false,
+            open_dialog_path: String::new(),
+            open_dialog_error: None,
+            show_save_as_dialog: false,
+            save_dialog_path: String::new(),
+            save_dialog_error: None,
+            current_document_path: if Path::new(&initial_document_id).exists() {
+                Some(PathBuf::from(&initial_document_id))
+            } else {
+                None
+            },
+            document_dirty: false,
+            untitled_counter: 1,
+            pending_exit: false,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -788,6 +812,7 @@ impl RustNotePadApp {
             .update_document(&self.current_document_id, &self.editor_preview);
         self.status.refresh_cursor(&self.editor_preview);
         self.refresh_completions();
+        self.mark_document_dirty();
     }
 
     fn start_macro_recording(&mut self) {
@@ -981,6 +1006,27 @@ impl RustNotePadApp {
         }
     }
 
+    fn handle_file_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.file.new" => self.new_document(),
+            "menu.file.open" => self.prompt_open_document(),
+            "menu.file.save" => self.save_current_document(),
+            "menu.file.save_as" => self.prompt_save_as(),
+            "menu.file.save_all" => self.save_all_documents(),
+            "menu.file.close" => self.close_active_document(),
+            "menu.file.close_all" => self.close_all_documents(),
+            "menu.file.exit" => {
+                self.pending_exit = true;
+            }
+            _ => {
+                log_warn(self.localized_owned(
+                    format!("Unsupported file command {item_key}"),
+                    format!("未支援的檔案指令 {item_key}"),
+                ));
+            }
+        }
+    }
+
     fn handle_macro_command(&mut self, item_key: &str) {
         match item_key {
             "menu.macro.start_recording" => self.start_macro_recording(),
@@ -1003,6 +1049,120 @@ impl RustNotePadApp {
                 format!("Unsupported run command {item_key}"),
                 format!("未支援的執行指令 {item_key}"),
             ));
+        }
+    }
+
+    fn new_document(&mut self) {
+        let index = self.untitled_counter;
+        self.untitled_counter += 1;
+        let tab_id = format!("untitled-{index}");
+        let title = self.localized_owned(format!("Untitled {index}"), format!("未命名 {index}"));
+
+        let language_name = self.language_display_name("plaintext");
+        if let Some(pane) = self
+            .layout
+            .panes
+            .iter_mut()
+            .find(|pane| pane.role == PaneRole::Primary)
+        {
+            let mut tab = TabView::new(tab_id.clone(), title.clone());
+            tab.language = Some(language_name.clone());
+            pane.tabs.push(tab);
+            pane.active = Some(tab_id.clone());
+        }
+
+        self.current_document_id = tab_id.clone();
+        self.current_document_path = None;
+        self.current_language_id = "plaintext".into();
+        self.editor_preview.clear();
+        self.document_dirty = false;
+        self.set_tab_dirty_state(&tab_id, false);
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.status.refresh_cursor(&self.editor_preview);
+        self.status.set_document_language(language_name);
+        self.refresh_completions();
+        self.status.refresh_from_layout(&self.layout);
+        log_info(self.localized_owned(
+            format!("Created new document {tab_id}"),
+            format!("已建立新文件 {title}"),
+        ));
+    }
+
+    fn prompt_open_document(&mut self) {
+        self.open_dialog_error = None;
+        if self.open_dialog_path.is_empty() {
+            if let Some(path) = self.current_document_path.as_ref() {
+                self.open_dialog_path = path.to_string_lossy().into_owned();
+            }
+        }
+        self.show_open_dialog = true;
+    }
+
+    fn prompt_save_as(&mut self) {
+        self.save_dialog_error = None;
+        if let Some(path) = self.current_document_path.as_ref() {
+            self.save_dialog_path = path.to_string_lossy().into_owned();
+        } else if self.save_dialog_path.is_empty() {
+            self.save_dialog_path = format!("{}.txt", self.current_document_id);
+        }
+        self.show_save_as_dialog = true;
+    }
+
+    fn save_current_document(&mut self) {
+        if let Some(path) = self.current_document_path.clone() {
+            match self.write_document_to(&path) {
+                Ok(()) => {
+                    log_info(self.localized_owned(
+                        format!("Saved {}", path.display()),
+                        format!("已儲存 {}", path.display()),
+                    ));
+                }
+                Err(err) => {
+                    log_error(self.localized_owned(
+                        format!("Save failed: {err}"),
+                        format!("儲存失敗：{err}"),
+                    ));
+                }
+            }
+        } else {
+            self.prompt_save_as();
+        }
+    }
+
+    fn save_all_documents(&mut self) {
+        self.save_current_document();
+        log_info(self.localized(
+            "Save All currently writes only the active document",
+            "「全部儲存」目前僅處理作用中文件",
+        ));
+    }
+
+    fn close_active_document(&mut self) {
+        let current_id = self.current_document_id.clone();
+        let should_close = self.layout.panes.iter().any(|pane| {
+            pane.role == PaneRole::Primary && pane.active.as_deref() == Some(current_id.as_str())
+        });
+        if should_close {
+            self.close_tab(PaneRole::Primary, &current_id);
+        }
+    }
+
+    fn close_all_documents(&mut self) {
+        let tab_ids: Vec<String> = self
+            .layout
+            .panes
+            .iter()
+            .filter(|pane| pane.role == PaneRole::Primary)
+            .flat_map(|pane| {
+                pane.tabs
+                    .iter()
+                    .filter(|tab| !tab.is_locked && !tab.is_pinned)
+                    .map(|tab| tab.id.clone())
+            })
+            .collect();
+        for tab_id in tab_ids {
+            self.close_tab(PaneRole::Primary, &tab_id);
         }
     }
 
@@ -1141,6 +1301,147 @@ impl RustNotePadApp {
 
     fn text<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
         self.localization.text(key)
+    }
+
+    fn attempt_open_dialog(&mut self) -> bool {
+        let trimmed = self.open_dialog_path.trim().to_string();
+        if trimmed.is_empty() {
+            self.open_dialog_error =
+                Some(self.localized("Please enter a file path", "請輸入檔案路徑"));
+            return false;
+        }
+
+        let path = PathBuf::from(trimmed.as_str());
+        if !path.is_file() {
+            self.open_dialog_error = Some(self.localized_owned(
+                format!("File not found: {}", path.display()),
+                format!("找不到檔案：{}", path.display()),
+            ));
+            return false;
+        }
+
+        let display = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(trimmed.as_str())
+            .to_string();
+        self.open_document(trimmed.as_str(), &display);
+        self.open_dialog_error = None;
+        self.open_dialog_path.clear();
+        log_info(self.localized_owned(
+            format!("Opened {}", path.display()),
+            format!("已開啟 {}", path.display()),
+        ));
+        true
+    }
+
+    fn attempt_save_dialog(&mut self) -> bool {
+        let trimmed = self.save_dialog_path.trim().to_string();
+        if trimmed.is_empty() {
+            self.save_dialog_error =
+                Some(self.localized("Please enter a destination path", "請輸入儲存路徑"));
+            return false;
+        }
+
+        let path = PathBuf::from(trimmed.as_str());
+        match self.write_document_to(&path) {
+            Ok(()) => {
+                self.save_dialog_error = None;
+                log_info(self.localized_owned(
+                    format!("Saved {}", path.display()),
+                    format!("已儲存 {}", path.display()),
+                ));
+                true
+            }
+            Err(err) => {
+                self.save_dialog_error = Some(
+                    self.localized_owned(format!("Save failed: {err}"), format!("儲存失敗：{err}")),
+                );
+                false
+            }
+        }
+    }
+
+    fn write_document_to(&mut self, target: &Path) -> Result<(), String> {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(target, &self.editor_preview).map_err(|err| err.to_string())?;
+
+        let old_id = self.current_document_id.clone();
+        let new_id = target.to_string_lossy().into_owned();
+        let language_id = language_id_from_path(&new_id);
+
+        if old_id != new_id {
+            self.document_index.remove_document(&old_id);
+        }
+
+        self.current_document_id = new_id.clone();
+        self.current_document_path = Some(target.to_path_buf());
+        self.current_language_id = language_id.to_string();
+        self.document_dirty = false;
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.update_tab_identity(&old_id, &new_id, target, language_id);
+        self.set_tab_dirty_state(&new_id, false);
+        self.status
+            .set_document_language(self.language_display_name(language_id));
+        self.status.refresh_cursor(&self.editor_preview);
+        self.refresh_completions();
+        Ok(())
+    }
+
+    fn update_tab_identity(
+        &mut self,
+        old_id: &str,
+        new_id: &str,
+        target: &Path,
+        language_id: &str,
+    ) {
+        let language_name = self.language_display_name(language_id);
+        let display_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(new_id)
+            .to_string();
+
+        for pane in &mut self.layout.panes {
+            for tab in &mut pane.tabs {
+                if tab.id == old_id {
+                    tab.id = new_id.to_string();
+                    tab.title = display_name.clone();
+                    tab.language = Some(language_name.clone());
+                } else if tab.id == new_id {
+                    tab.language = Some(language_name.clone());
+                }
+            }
+            if pane.active.as_deref() == Some(old_id) {
+                pane.active = Some(new_id.to_string());
+            }
+        }
+    }
+
+    fn set_tab_dirty_state(&mut self, tab_id: &str, dirty: bool) {
+        for pane in &mut self.layout.panes {
+            for tab in &mut pane.tabs {
+                if tab.id == tab_id {
+                    let has_star = tab.title.ends_with('*');
+                    if dirty && !has_star {
+                        tab.title.push('*');
+                    } else if !dirty && has_star {
+                        tab.title.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark_document_dirty(&mut self) {
+        if !self.document_dirty {
+            self.document_dirty = true;
+            let tab_id = self.current_document_id.clone();
+            self.set_tab_dirty_state(&tab_id, true);
+        }
     }
 
     fn format_indexed(&self, key: &str, values: &[String]) -> String {
@@ -1372,8 +1673,17 @@ impl RustNotePadApp {
         let fallback_template = self.text("document.load_error").into_owned();
         let contents =
             fs::read_to_string(path).unwrap_or_else(|_| fallback_template.replace("{path}", path));
+        let old_id = self.current_document_id.clone();
+        if old_id != path {
+            self.document_index.remove_document(&old_id);
+        }
         self.editor_preview = contents;
         self.current_document_id = path.to_string();
+        self.current_document_path = if Path::new(path).is_file() {
+            Some(PathBuf::from(path))
+        } else {
+            None
+        };
         let language_id = language_hint
             .and_then(language_id_from_hint)
             .map(|id| id.to_string())
@@ -1383,6 +1693,9 @@ impl RustNotePadApp {
             .set_enabled(self.current_language_id.clone(), true);
         self.document_index
             .update_document(&self.current_document_id, &self.editor_preview);
+        self.document_dirty = false;
+        let current_id = self.current_document_id.clone();
+        self.set_tab_dirty_state(&current_id, false);
         self.status.refresh_cursor(&self.editor_preview);
         self.status
             .set_document_language(self.language_display_name(&language_id));
@@ -1421,6 +1734,8 @@ impl RustNotePadApp {
                 self.editor_preview = self.sample_editor_content.clone();
                 self.current_document_id = PREVIEW_DOCUMENT_ID.to_string();
                 self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
+                self.current_document_path = None;
+                self.document_dirty = false;
                 self.document_index
                     .update_document(&self.current_document_id, &self.editor_preview);
                 self.status.refresh_cursor(&self.editor_preview);
@@ -1526,6 +1841,7 @@ impl RustNotePadApp {
                             let is_settings = section.title_key == "menu.settings";
                             let is_macro = section.title_key == "menu.macro";
                             let is_run = section.title_key == "menu.run";
+                            let is_file = section.title_key == "menu.file";
                             for item_key in section.item_keys {
                                 let label = self.text(item_key).into_owned();
                                 if is_settings {
@@ -1541,6 +1857,11 @@ impl RustNotePadApp {
                                 } else if is_run {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_run_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_file {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_file_command(item_key);
                                         ui.close_menu();
                                     }
                                 } else {
@@ -2001,6 +2322,7 @@ impl RustNotePadApp {
                                                 &self.editor_preview,
                                             );
                                             self.refresh_completions();
+                                            self.mark_document_dirty();
                                         }
                                     });
                             },
@@ -2538,6 +2860,12 @@ impl App for RustNotePadApp {
         self.show_status_bar(ctx);
         self.show_editor_area(ctx);
         self.render_settings_window(ctx);
+        self.render_file_dialogs(ctx);
+
+        if self.pending_exit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.pending_exit = false;
+        }
     }
 }
 
@@ -2695,6 +3023,69 @@ impl RustNotePadApp {
         ui.heading(self.text("settings.placeholder.heading").to_string());
         ui.separator();
         ui.label(self.text(key).to_string());
+    }
+
+    fn render_file_dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_open_dialog {
+            let mut open = self.show_open_dialog;
+            let mut should_close = false;
+            egui::Window::new(self.localized("Open File", "開啟檔案"))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.label(self.localized("Enter a path to open", "輸入要開啟的檔案路徑"));
+                    ui.add(egui::TextEdit::singleline(&mut self.open_dialog_path));
+                    if let Some(err) = &self.open_dialog_error {
+                        ui.colored_label(Color32::from_rgb(239, 68, 68), err);
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(self.localized("Open", "開啟")).clicked() {
+                            if self.attempt_open_dialog() {
+                                should_close = true;
+                            }
+                        }
+                        if ui.button(self.localized("Cancel", "取消")).clicked() {
+                            self.open_dialog_error = None;
+                            self.open_dialog_path.clear();
+                            should_close = true;
+                        }
+                    });
+                });
+            self.show_open_dialog = if should_close { false } else { open };
+        }
+
+        if self.show_save_as_dialog {
+            let mut open = self.show_save_as_dialog;
+            let mut should_close = false;
+            egui::Window::new(self.localized("Save As", "另存新檔"))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.label(self.localized("Choose a destination path", "選擇要儲存的路徑"));
+                    ui.add(egui::TextEdit::singleline(&mut self.save_dialog_path));
+                    if let Some(err) = &self.save_dialog_error {
+                        ui.colored_label(Color32::from_rgb(239, 68, 68), err);
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button(self.localized("Save", "儲存")).clicked() {
+                            if self.attempt_save_dialog() {
+                                should_close = true;
+                            }
+                        }
+                        if ui.button(self.localized("Cancel", "取消")).clicked() {
+                            self.save_dialog_error = None;
+                            should_close = true;
+                        }
+                    });
+                });
+            self.show_save_as_dialog = if should_close { false } else { open };
+        }
     }
 }
 
