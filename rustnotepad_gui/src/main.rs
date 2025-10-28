@@ -5,6 +5,7 @@ use egui::{
     vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
     TextStyle,
 };
+use image::load_from_memory;
 use once_cell::sync::Lazy;
 use rustnotepad_autocomplete::{
     CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
@@ -25,7 +26,7 @@ use rustnotepad_settings::{
     SnippetStore, TabColorTag, TabView, ThemeDefinition, ThemeKind, ThemeManager,
 };
 use std::borrow::Cow;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write as IoWrite;
@@ -33,6 +34,19 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rustnotepad_printing::job::{
+    DuplexMode as PrintDuplexMode, Margin as PrintMargin, Orientation as PrintOrientation,
+    PageRange as PrintPageRange, PaperId as PrintPaperId, PaperSize as PrintPaperSize, PrintJobId,
+};
+use rustnotepad_printing::layout::{
+    LayoutInput as PrintLayoutInput, LayoutOptions as PrintLayoutOptions, WrapMode as PrintWrapMode,
+};
+use rustnotepad_printing::platform::{PlatformAdapter, PlatformJobHandle, SpoolPage};
+use rustnotepad_printing::{
+    run_print_job, HeaderFooterTemplate, PreviewCache, PreviewConfig, PrintColorMode,
+    PrintJobOptions, PrintPreviewKey, SimplePaginator,
+};
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
@@ -65,6 +79,23 @@ struct RunLogEntry {
     stderr_text: String,
     timeout_ms: Option<u64>,
     kill_on_timeout: bool,
+}
+
+struct PrintPreviewState {
+    visible: bool,
+    zoom_levels: Vec<u32>,
+    zoom_index: usize,
+    selected_page: u32,
+    cache: PreviewCache,
+    job_id: Option<PrintJobId>,
+    total_pages: u32,
+    base_dpi: u32,
+    textures: HashMap<PrintPreviewKey, egui::TextureHandle>,
+    header_template: HeaderFooterTemplate,
+    footer_template: HeaderFooterTemplate,
+    last_pdf: Option<Vec<u8>>,
+    last_error: Option<String>,
+    generation: u64,
 }
 
 fn log_with_level(message: impl Into<String>, level: &str) {
@@ -102,6 +133,229 @@ fn append_log_line(line: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+impl PrintPreviewState {
+    fn new() -> Self {
+        let header_template =
+            HeaderFooterTemplate::parse("&lRustNotePad&c&p&r&P").unwrap_or_default();
+        let footer_template =
+            HeaderFooterTemplate::parse("&l&c&f&rPage &p / &P").unwrap_or_default();
+        Self {
+            visible: false,
+            zoom_levels: vec![100, 125, 150, 200],
+            zoom_index: 0,
+            selected_page: 1,
+            cache: PreviewCache::with_capacity(24),
+            job_id: None,
+            total_pages: 0,
+            base_dpi: 96,
+            textures: HashMap::new(),
+            header_template,
+            footer_template,
+            last_pdf: None,
+            last_error: None,
+            generation: 0,
+        }
+    }
+
+    fn zoom(&self) -> u32 {
+        self.zoom_levels
+            .get(self.zoom_index)
+            .copied()
+            .unwrap_or(100)
+    }
+
+    fn set_zoom(&mut self, index: usize) {
+        if index < self.zoom_levels.len() {
+            self.zoom_index = index;
+            self.textures.clear();
+        }
+    }
+
+    fn layout_options(&self) -> PrintLayoutOptions {
+        PrintLayoutOptions {
+            paper: PrintPaperSize::new(PrintPaperId::A4, 210.0, 297.0),
+            orientation: PrintOrientation::Portrait,
+            margins: PrintMargin {
+                top: 36.0,
+                bottom: 36.0,
+                left: 36.0,
+                right: 36.0,
+            },
+            wrap_mode: PrintWrapMode::NoWrap,
+            dpi: 96.0,
+            font_family: "JetBrains Mono".into(),
+            font_size_pt: 11.0,
+            line_height_pt: 14.0,
+            average_char_width_pt: 7.0,
+        }
+    }
+
+    fn refresh(&mut self, title: Option<&str>, content: &str) -> Result<(), String> {
+        if let Some(job_id) = self.job_id {
+            self.cache.remove_job(job_id);
+        }
+        self.textures.clear();
+        self.generation = self.generation.wrapping_add(1);
+
+        let input = EditorLayoutInput::from_text(content);
+        let layout_options = self.layout_options();
+        let mut header = self.header_template.clone();
+        if let Some(title) = title {
+            if !title.is_empty() {
+                header =
+                    HeaderFooterTemplate::parse(&format!("&l{title}&c&p&r&P")).unwrap_or(header);
+            }
+        }
+        let job_options = PrintJobOptions::new(
+            None,
+            layout_options.paper,
+            layout_options.orientation,
+            layout_options.margins,
+            1,
+            PrintColorMode::Color,
+            PrintDuplexMode::Off,
+            PrintPageRange::All,
+            header,
+            self.footer_template.clone(),
+        );
+        let job_id = job_options.job_id;
+        let adapter = PreviewAdapter::default();
+        let preview = PreviewConfig {
+            cache: &mut self.cache,
+            zoom_levels: self.zoom_levels.as_slice(),
+            base_dpi: self.base_dpi,
+        };
+
+        let result = run_print_job(
+            &SimplePaginator::default(),
+            &input,
+            &layout_options,
+            &job_options,
+            &adapter,
+            Some(preview),
+        )
+        .map_err(|err| err.to_string())?;
+
+        self.job_id = Some(job_id);
+        self.total_pages = result.summary.total_pages.max(1);
+        self.selected_page = 1;
+        self.last_pdf = Some(result.pdf_data);
+        self.last_error = None;
+        Ok(())
+    }
+
+    fn current_key(&self) -> Option<PrintPreviewKey> {
+        let job_id = self.job_id?;
+        let page = self.selected_page.clamp(1, self.total_pages.max(1));
+        Some(PrintPreviewKey {
+            job_id,
+            page,
+            zoom_percent: self.zoom(),
+        })
+    }
+
+    fn texture_for(
+        &mut self,
+        ctx: &egui::Context,
+        key: PrintPreviewKey,
+    ) -> Result<egui::TextureHandle, String> {
+        if let Some(existing) = self.textures.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        let (width, height, data) = {
+            let entry = self
+                .cache
+                .get(&key)
+                .ok_or_else(|| format!("preview cache miss for page {}", key.page))?;
+            (entry.width_px, entry.height_px, entry.data.clone())
+        };
+
+        let image = load_from_memory(&data).map_err(|err| err.to_string())?;
+        let rgba = image.to_rgba8();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize],
+            rgba.as_raw(),
+        );
+        let name = format!(
+            "print-preview-{}-{}-{}-{}",
+            self.generation, key.job_id, key.page, key.zoom_percent
+        );
+        let texture = ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR);
+        self.textures.insert(key, texture.clone());
+        Ok(texture)
+    }
+
+    fn next_page(&mut self) {
+        if self.selected_page < self.total_pages {
+            self.selected_page += 1;
+            self.textures.clear();
+        }
+    }
+
+    fn previous_page(&mut self) {
+        if self.selected_page > 1 {
+            self.selected_page -= 1;
+            self.textures.clear();
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreviewAdapter;
+
+struct PreviewHandle;
+
+impl PlatformAdapter for PreviewAdapter {
+    type Error = String;
+    type JobHandle = PreviewHandle;
+
+    fn begin_job(&self, _options: &PrintJobOptions) -> Result<Self::JobHandle, Self::Error> {
+        Ok(PreviewHandle)
+    }
+}
+
+impl PlatformJobHandle for PreviewHandle {
+    type Error = String;
+
+    fn submit_page(&mut self, _page: SpoolPage) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn abort(self, _reason: &str) {}
+}
+
+struct EditorLayoutInput {
+    lines: Vec<String>,
+}
+
+impl EditorLayoutInput {
+    fn from_text(text: &str) -> Self {
+        let mut lines = text
+            .split_inclusive('\n')
+            .map(|line| line.trim_end_matches('\n').to_string())
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        Self { lines }
+    }
+}
+
+impl PrintLayoutInput for EditorLayoutInput {
+    fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn line_text(&self, index: usize) -> Option<&str> {
+        self.lines.get(index).map(|line| line.as_str())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct MenuSection {
     title_key: &'static str,
@@ -129,6 +383,7 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
                 "menu.file.save_all",
                 "menu.file.close",
                 "menu.file.close_all",
+                "menu.file.print_preview",
                 "menu.file.exit",
             ],
         ),
@@ -473,6 +728,7 @@ struct RustNotePadApp {
     document_dirty: bool,
     untitled_counter: usize,
     pending_exit: bool,
+    print_preview: PrintPreviewState,
 }
 
 impl Default for RustNotePadApp {
@@ -708,6 +964,7 @@ impl Default for RustNotePadApp {
             document_dirty: false,
             untitled_counter: 1,
             pending_exit: false,
+            print_preview: PrintPreviewState::new(),
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -777,6 +1034,114 @@ impl RustNotePadApp {
         }
         let result = self.autocomplete_engine.request(request);
         self.completion_results = result.items;
+    }
+
+    fn generate_print_preview(&mut self) -> Result<(), String> {
+        let title = self
+            .current_document_path
+            .as_ref()
+            .and_then(|path| path.file_name().and_then(|name| name.to_str()))
+            .or_else(|| Some(self.current_document_id.as_str()));
+        self.print_preview.refresh(title, &self.editor_preview)
+    }
+
+    fn open_print_preview(&mut self) {
+        self.print_preview.visible = true;
+        if let Err(err) = self.generate_print_preview() {
+            self.print_preview.last_error = Some(err);
+        }
+    }
+
+    fn refresh_print_preview(&mut self) {
+        if let Err(err) = self.generate_print_preview() {
+            self.print_preview.last_error = Some(err);
+        }
+    }
+
+    fn toggle_print_preview(&mut self) {
+        if self.print_preview.visible {
+            self.print_preview.visible = false;
+        } else {
+            self.open_print_preview();
+        }
+    }
+
+    fn show_print_preview_window(&mut self, ctx: &egui::Context) {
+        if !self.print_preview.visible {
+            return;
+        }
+
+        let mut open = true;
+        let title = self.localized("Print Preview", "列印預覽");
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(true)
+            .default_size(vec2(540.0, 720.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(self.localized("Refresh", "重新整理")).clicked() {
+                        self.refresh_print_preview();
+                    }
+
+                    let mut selected_zoom = self.print_preview.zoom_index;
+                    egui::ComboBox::from_label(self.localized("Zoom", "縮放"))
+                        .selected_text(format!("{}%", self.print_preview.zoom()))
+                        .show_ui(ui, |ui| {
+                            for (idx, zoom) in self.print_preview.zoom_levels.iter().enumerate() {
+                                ui.selectable_value(&mut selected_zoom, idx, format!("{zoom}%"));
+                            }
+                        });
+                    if selected_zoom != self.print_preview.zoom_index {
+                        self.print_preview.set_zoom(selected_zoom);
+                    }
+
+                    ui.separator();
+                    if ui.button("◀").clicked() {
+                        self.print_preview.previous_page();
+                    }
+                    ui.label(format!(
+                        "{} / {}",
+                        self.print_preview.selected_page,
+                        self.print_preview.total_pages.max(1)
+                    ));
+                    if ui.button("▶").clicked() {
+                        self.print_preview.next_page();
+                    }
+                });
+
+                ui.separator();
+                if let Some(err) = self.print_preview.last_error.clone() {
+                    ui.colored_label(Color32::from_rgb(220, 0, 0), err);
+                    return;
+                }
+
+                if let Some(key) = self.print_preview.current_key() {
+                    match self.print_preview.texture_for(ctx, key) {
+                        Ok(texture) => {
+                            let size = texture.size();
+                            let size_vec = vec2(size[0] as f32, size[1] as f32);
+                            let available = ui.available_width();
+                            let scale = if size_vec.x > 0.0 {
+                                (available / size_vec.x).min(1.0).max(0.1)
+                            } else {
+                                1.0
+                            };
+                            let display_size = vec2(size_vec.x * scale, size_vec.y * scale);
+                            ui.add(egui::Image::new((texture.id(), display_size)));
+                        }
+                        Err(err) => {
+                            ui.colored_label(Color32::from_rgb(220, 0, 0), err.clone());
+                            self.print_preview.last_error = Some(err);
+                        }
+                    }
+                } else {
+                    ui.label(self.localized("No pages to display", "沒有可預覽的頁面"));
+                }
+            });
+
+        if !open {
+            self.print_preview.visible = false;
+        }
     }
 
     fn push_macro_log(&mut self, message: impl Into<String>) {
@@ -1015,6 +1380,7 @@ impl RustNotePadApp {
             "menu.file.save_all" => self.save_all_documents(),
             "menu.file.close" => self.close_active_document(),
             "menu.file.close_all" => self.close_all_documents(),
+            "menu.file.print_preview" => self.toggle_print_preview(),
             "menu.file.exit" => {
                 self.pending_exit = true;
             }
@@ -2861,6 +3227,7 @@ impl App for RustNotePadApp {
         self.show_editor_area(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
+        self.show_print_preview_window(ctx);
 
         if self.pending_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

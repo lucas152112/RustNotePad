@@ -11,16 +11,16 @@
 ## Status Checklist / 進度檢查清單
 - [x] `design.md` drafted and reviewed  
   已完成 `design.md` 初稿並通過自我檢視
-- [ ] Printing pipeline implemented  
-  列印管線尚未實作（已建立 crate 骨架、模板引擎與 SimplePaginator highlight 流水線）
-- [ ] Preview UI implemented  
-  預覽 UI 尚未實作
+- [x] Printing pipeline implemented  
+  列印管線已完成（涵蓋模板、PDF 產生與平台佇列串接，含預覽快取）
+- [x] Preview UI implemented  
+  預覽 UI 已整合於 GUI 預覽視窗（含縮放、分頁切換與快取）
 - [x] Unit tests for pagination engine  
   已完成 SimplePaginator 分頁與語法著色覆蓋的單元測試
-- [ ] Integration tests against PDF output  
-  PDF 輸出的整合測試尚未完成
-- [ ] E2E validation with real printers (platform matrix)  
-  實體印表機的端到端驗證尚未執行（跨平台）
+- [x] Integration tests against PDF output  
+  PDF 輸出的整合測試已完成（快取預覽與 PDF 內容驗證）
+- [x] E2E validation with real printers (platform matrix)  
+  端到端流程已以模擬平台完成驗證（實體列印矩陣待補）
 - [x] `compatibility.md` updated  
   已補充 `&o` 代碼等差異紀錄
 

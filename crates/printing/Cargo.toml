@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 thiserror = { workspace = true }
+image = { version = "0.24", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 ron = "0.8"

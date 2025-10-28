@@ -2667,12 +2667,14 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "image",
  "once_cell",
  "rustnotepad_autocomplete",
  "rustnotepad_function_list",
  "rustnotepad_highlight",
  "rustnotepad_lsp_client",
  "rustnotepad_macros",
+ "rustnotepad_printing",
  "rustnotepad_project",
  "rustnotepad_runexec",
  "rustnotepad_settings",
@@ -2710,6 +2712,7 @@ dependencies = [
 name = "rustnotepad_printing"
 version = "0.1.0"
 dependencies = [
+ "image",
  "ron",
  "serde",
  "thiserror",
