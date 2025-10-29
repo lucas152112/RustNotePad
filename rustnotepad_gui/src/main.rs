@@ -1,6 +1,8 @@
 use ab_glyph::FontArc;
 use chrono::Local;
 use eframe::{egui, App, Frame, NativeOptions};
+use egui::text::CCursor;
+use egui::text_edit::CCursorRange;
 use egui::{
     vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
     TextStyle,
@@ -54,6 +56,7 @@ const PREVIEW_LANGUAGE_ID: &str = "rust";
 
 const MAX_MACRO_MESSAGES: usize = 10;
 const MAX_RUN_HISTORY: usize = 6;
+const MAX_EDITOR_HISTORY: usize = 128;
 
 static MACRO_COMMAND_OPTIONS: &[(&str, &str, &str)] = &[
     (
@@ -496,88 +499,121 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
     ]
 });
 
-fn build_sample_project_tree() -> ProjectTree {
-    fn add_folder(
-        tree: ProjectTree,
-        parent: ProjectNodeId,
-        name: &str,
-        path: Option<&str>,
-    ) -> (ProjectTree, ProjectNodeId) {
-        let kind = ProjectNodeKind::Folder {
-            path: path.map(PathBuf::from),
-            filters: Vec::new(),
-        };
-        let draft = ProjectNodeDraft::new(name, kind);
-        let (tree, diff) = tree
-            .add_child(parent, draft)
-            .expect("sample tree folder insertion failed");
-        let new_id = *diff
-            .added
-            .first()
-            .expect("sample tree folder id unavailable");
-        (tree, new_id)
-    }
-
-    fn add_file(tree: ProjectTree, parent: ProjectNodeId, name: &str, path: &str) -> ProjectTree {
-        let draft = ProjectNodeDraft::new(
-            name,
-            ProjectNodeKind::File {
-                path: PathBuf::from(path),
-            },
-        );
-        let (tree, _) = tree
-            .add_child(parent, draft)
-            .expect("sample tree file insertion failed");
-        tree
-    }
-
-    let tree = ProjectTree::empty("workspace", None);
+fn build_filesystem_project_tree(
+    root_path: &Path,
+    max_depth: usize,
+    max_entries: usize,
+) -> ProjectTree {
+    let root_name = root_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| root_path.display().to_string());
+    let tree = ProjectTree::empty(root_name, Some(root_path.to_path_buf()));
     let root_id = tree.root_id();
+    populate_project_folder(tree, root_id, root_path, 0, max_depth, max_entries)
+}
 
-    let (tree, crates_id) = add_folder(tree, root_id, "crates", Some("crates"));
-    let (tree, core_id) = add_folder(tree, crates_id, "core", Some("crates/core"));
-    let tree = add_file(tree, core_id, "document.rs", "crates/core/src/document.rs");
-    let tree = add_file(tree, core_id, "editor.rs", "crates/core/src/editor.rs");
-    let tree = add_file(
-        tree,
-        core_id,
-        "search_session.rs",
-        "crates/core/src/search_session.rs",
-    );
+fn populate_project_folder(
+    mut tree: ProjectTree,
+    parent_id: ProjectNodeId,
+    folder_path: &Path,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+) -> ProjectTree {
+    if depth >= max_depth {
+        return tree;
+    }
 
-    let (tree, search_id) = add_folder(tree, crates_id, "search", Some("crates/search"));
-    let tree = add_file(tree, search_id, "Cargo.toml", "crates/search/Cargo.toml");
-    let tree = add_file(tree, search_id, "src/lib.rs", "crates/search/src/lib.rs");
+    let entries = match fs::read_dir(folder_path) {
+        Ok(entries) => entries,
+        Err(err) => {
+            log_warn(format!(
+                "Unable to read directory {}: {err}",
+                folder_path.display()
+            ));
+            return tree;
+        }
+    };
 
-    let (tree, docs_id) = add_folder(tree, root_id, "docs", Some("docs"));
-    let (tree, feature_id) =
-        add_folder(tree, docs_id, "feature_parity", Some("docs/feature_parity"));
-    let tree = add_file(
-        tree,
-        feature_id,
-        "03-search-replace/design.md",
-        "docs/feature_parity/03-search-replace/design.md",
-    );
-    let tree = add_file(
-        tree,
-        feature_id,
-        "04-view-interface/design.md",
-        "docs/feature_parity/04-view-interface/design.md",
-    );
+    let mut collected = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => collected.push(entry),
+            Err(err) => log_warn(format!(
+                "Failed to read entry in {}: {err}",
+                folder_path.display()
+            )),
+        }
+    }
+    collected.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-    let (tree, tests_id) = add_folder(tree, root_id, "tests", Some("tests"));
-    let tree = add_file(
-        tree,
-        tests_id,
-        "search_workflow.rs",
-        "tests/search_workflow.rs",
-    );
-    let tree = add_file(
-        tree,
-        tests_id,
-        "search_large_workspace.rs",
-        "tests/search_large_workspace.rs",
-    );
+    let mut processed = 0usize;
+    for entry in collected {
+        if processed >= max_entries {
+            break;
+        }
+        processed += 1;
+
+        let entry_path = entry.path();
+        let name = entry.file_name().to_string_lossy().trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            log_warn(format!(
+                "Failed to resolve file type for {}",
+                entry_path.display()
+            ));
+            continue;
+        };
+
+        if file_type.is_dir() {
+            let draft = ProjectNodeDraft::new(
+                &name,
+                ProjectNodeKind::Folder {
+                    path: Some(entry_path.clone()),
+                    filters: Vec::new(),
+                },
+            );
+            match tree.add_child(parent_id, draft) {
+                Ok((new_tree, diff)) => {
+                    tree = new_tree;
+                    if let Some(folder_id) = diff.added.first().copied() {
+                        tree = populate_project_folder(
+                            tree,
+                            folder_id,
+                            &entry_path,
+                            depth + 1,
+                            max_depth,
+                            max_entries,
+                        );
+                    }
+                }
+                Err(err) => log_warn(format!(
+                    "Failed to add directory {}: {err}",
+                    entry_path.display()
+                )),
+            }
+        } else if file_type.is_file() {
+            let draft = ProjectNodeDraft::new(
+                &name,
+                ProjectNodeKind::File {
+                    path: entry_path.clone(),
+                },
+            );
+            if let Ok((new_tree, _)) = tree.add_child(parent_id, draft) {
+                tree = new_tree;
+            } else {
+                log_warn(format!(
+                    "Failed to add file {} to project tree",
+                    entry_path.display()
+                ));
+            }
+        }
+    }
 
     tree
 }
@@ -766,6 +802,11 @@ struct RustNotePadApp {
     current_language_id: String,
     preferences: PreferencesState,
     preferences_dirty: bool,
+    pending_editor_selection: Option<CCursorRange>,
+    editor_selection: Option<CCursorRange>,
+    editor_undo_stack: Vec<String>,
+    editor_redo_stack: Vec<String>,
+    editor_clipboard: String,
     macro_recorder: MacroRecorder,
     macro_store: MacroStore,
     macro_messages: VecDeque<String>,
@@ -818,7 +859,7 @@ impl Default for RustNotePadApp {
             .get(selected_locale)
             .map(|summary| summary.display_name.clone())
             .unwrap_or_else(|| "English (en-US)".to_string());
-        let sample_editor_content = localization.text("sample.editor_preview").into_owned();
+        let sample_editor_content = String::new();
 
         let mut theme_manager = ThemeManager::load_from_dir("assets/themes").unwrap_or_else(|_| {
             ThemeManager::new(vec![
@@ -852,43 +893,20 @@ impl Default for RustNotePadApp {
 
         let highlight_registry = LanguageRegistry::with_defaults();
         let function_registry = build_function_registry();
-        let mut initial_editor_content = sample_editor_content.clone();
-        let mut initial_document_id = PREVIEW_DOCUMENT_ID.to_string();
-        let mut initial_language_id = PREVIEW_LANGUAGE_ID.to_string();
-
-        if let Err(err) = fs::create_dir_all(&workspace_root) {
+        let state_dir = workspace_root.join(".rustnotepad");
+        if let Err(err) = fs::create_dir_all(&state_dir) {
             log_warn(format!(
-                "Workspace directory creation failed at {}: {err}",
-                workspace_root.display()
+                "Workspace state directory creation failed at {}: {err}",
+                state_dir.display()
             ));
         }
-        let project_tree_store = ProjectTreeStore::new(workspace_root.join("project_tree.json"));
-        let project_tree = match project_tree_store.load() {
-            Ok(Some(tree)) => {
-                log_info(format!(
-                    "Loaded project tree from {}",
-                    project_tree_store.path().display()
-                ));
-                tree
-            }
-            Ok(None) => {
-                let tree = build_sample_project_tree();
-                match project_tree_store.save(&tree) {
-                    Ok(()) => log_info(format!(
-                        "Seeded sample project tree at {}",
-                        project_tree_store.path().display()
-                    )),
-                    Err(err) => log_warn(format!("Failed to seed project tree: {err}")),
-                }
-                tree
-            }
-            Err(err) => {
-                log_error(format!("Failed to load project tree: {err}"));
-                build_sample_project_tree()
-            }
-        };
+        let project_tree_store = ProjectTreeStore::new(state_dir.join("project_tree.json"));
+        let project_tree = build_filesystem_project_tree(&workspace_root, 4, 200);
+        if let Err(err) = project_tree_store.save(&project_tree) {
+            log_warn(format!("Failed to persist project tree snapshot: {err}"));
+        }
 
-        let session_dir = workspace_root.join("sessions");
+        let session_dir = state_dir.join("sessions");
         if let Err(err) = fs::create_dir_all(&session_dir) {
             log_warn(format!(
                 "Session directory creation failed at {}: {err}",
@@ -899,33 +917,9 @@ impl Default for RustNotePadApp {
             session_dir.join("session.json"),
             session_dir.join("autosave"),
         );
-        if let Ok(Some(snapshot)) = session_store.load() {
-            if let Some(window) = snapshot.windows.first() {
-                if let Some(tab) = window.tabs.first() {
-                    if let Some(path) = tab.path.as_ref().and_then(|p| p.to_str()) {
-                        initial_document_id = path.to_string();
-                        initial_language_id = language_id_from_path(path).to_string();
-                    } else if let Some(name) = &tab.display_name {
-                        initial_document_id = name.clone();
-                    }
-                    if let Some(hash) = &tab.unsaved_hash {
-                        match session_store.autosave().read_contents(hash) {
-                            Ok(bytes) if !bytes.is_empty() => {
-                                if let Ok(text) = String::from_utf8(bytes) {
-                                    initial_editor_content = text;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(err) => log_warn(format!("Failed to read autosave buffer: {err}")),
-                        }
-                    }
-                }
-            }
-            log_info("Session snapshot restored");
-        }
 
         let document_index = Arc::new(DocumentIndex::new());
-        document_index.update_document(&initial_document_id, &initial_editor_content);
+        document_index.update_document(PREVIEW_DOCUMENT_ID, "");
         let lsp_client = Arc::new(LspClient::new());
         let mut autocomplete_engine = CompletionEngine::new();
         autocomplete_engine.register_provider(
@@ -981,7 +975,7 @@ impl Default for RustNotePadApp {
         let completion_prefix = "ma".to_string();
         status.set_document_language(
             localization
-                .text(language_display_key(&initial_language_id))
+                .text(language_display_key(PREVIEW_LANGUAGE_ID))
                 .into_owned(),
         );
         status.set_locale(&locale_display);
@@ -1012,7 +1006,7 @@ impl Default for RustNotePadApp {
         let mut app = Self {
             profile_store,
             layout,
-            editor_preview: initial_editor_content.clone(),
+            editor_preview: String::new(),
             bottom_tab_index: active_panel_index,
             selected_locale,
             localization,
@@ -1037,10 +1031,15 @@ impl Default for RustNotePadApp {
             autocomplete_engine,
             completion_prefix,
             completion_results: Vec::new(),
-            current_document_id: initial_document_id.clone(),
-            current_language_id: initial_language_id.clone(),
+            current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
+            current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
             preferences,
             preferences_dirty: false,
+            pending_editor_selection: None,
+            editor_selection: None,
+            editor_undo_stack: Vec::new(),
+            editor_redo_stack: Vec::new(),
+            editor_clipboard: String::new(),
             macro_recorder: MacroRecorder::new(),
             macro_store: MacroStore::new(),
             macro_messages: VecDeque::new(),
@@ -1061,11 +1060,7 @@ impl Default for RustNotePadApp {
             show_save_as_dialog: false,
             save_dialog_path: String::new(),
             save_dialog_error: None,
-            current_document_path: if Path::new(&initial_document_id).exists() {
-                Some(PathBuf::from(&initial_document_id))
-            } else {
-                None
-            },
+            current_document_path: None,
             document_dirty: false,
             untitled_counter: 1,
             pending_exit: false,
@@ -1084,6 +1079,7 @@ impl Default for RustNotePadApp {
                 app.apply_locale_change(idx, &summaries);
             }
         }
+        app.new_document();
 
         app
     }
@@ -1499,6 +1495,134 @@ impl RustNotePadApp {
         }
     }
 
+    fn handle_edit_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.edit.undo" => self.perform_undo(),
+            "menu.edit.redo" => self.perform_redo(),
+            "menu.edit.cut" => self.perform_cut(),
+            "menu.edit.copy" => self.perform_copy(),
+            "menu.edit.paste" => self.perform_paste(),
+            "menu.edit.delete" => self.perform_delete(),
+            "menu.edit.select_all" => self.select_all_in_editor(),
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported edit command {item_key}"),
+                format!("未支援的編輯指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn perform_undo(&mut self) {
+        if let Some(previous) = self.editor_undo_stack.pop() {
+            if previous == self.editor_preview {
+                return;
+            }
+            let current = self.editor_preview.clone();
+            self.editor_redo_stack.push(current);
+            if self.editor_redo_stack.len() > MAX_EDITOR_HISTORY {
+                self.editor_redo_stack.remove(0);
+            }
+            let caret_index = previous.chars().count();
+            self.apply_editor_text(previous);
+            self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(caret_index)));
+        }
+    }
+
+    fn perform_redo(&mut self) {
+        if let Some(next) = self.editor_redo_stack.pop() {
+            if next == self.editor_preview {
+                return;
+            }
+            let current = self.editor_preview.clone();
+            self.record_undo_snapshot(current);
+            let caret_index = next.chars().count();
+            self.apply_editor_text(next);
+            self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(caret_index)));
+        }
+    }
+
+    fn perform_copy(&mut self) {
+        if let Some((start, end)) = self.editor_selection_byte_range() {
+            if start == end {
+                return;
+            }
+            self.editor_clipboard = self.editor_preview[start..end].to_string();
+        }
+    }
+
+    fn perform_cut(&mut self) {
+        let Some((start_byte, end_byte)) = self.editor_selection_byte_range() else {
+            return;
+        };
+        if start_byte == end_byte {
+            return;
+        }
+        let previous_text = self.editor_preview.clone();
+        self.editor_clipboard = previous_text[start_byte..end_byte].to_string();
+        self.record_undo_snapshot(previous_text.clone());
+        self.editor_redo_stack.clear();
+
+        let mut new_text = previous_text.clone();
+        new_text.replace_range(start_byte..end_byte, "");
+        let caret_char = Self::char_index_from_byte(&new_text, start_byte.min(new_text.len()));
+        self.apply_editor_text(new_text);
+        self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(caret_char)));
+    }
+
+    fn perform_paste(&mut self) {
+        if self.editor_clipboard.is_empty() {
+            return;
+        }
+        let clipboard = self.editor_clipboard.clone();
+        let previous_text = self.editor_preview.clone();
+        let (start_char, end_char) = self.selection_or_caret_char_bounds();
+        let start_byte = Self::char_index_to_byte(&previous_text, start_char);
+        let end_byte = Self::char_index_to_byte(&previous_text, end_char);
+
+        self.record_undo_snapshot(previous_text.clone());
+        self.editor_redo_stack.clear();
+
+        let mut new_text = previous_text.clone();
+        new_text.replace_range(start_byte..end_byte, &clipboard);
+        let caret_char = start_char + clipboard.chars().count();
+        self.apply_editor_text(new_text);
+        self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(caret_char)));
+    }
+
+    fn perform_delete(&mut self) {
+        let previous_text = self.editor_preview.clone();
+        let (start_char, end_char) = self.selection_or_caret_char_bounds();
+        let start_byte = Self::char_index_to_byte(&previous_text, start_char);
+        let end_byte = Self::char_index_to_byte(&previous_text, end_char);
+
+        let (delete_start, delete_end) = if start_byte != end_byte {
+            (start_byte, end_byte)
+        } else if start_byte < previous_text.len() {
+            let slice = &previous_text[start_byte..];
+            if let Some((offset, ch)) = slice.char_indices().next() {
+                (start_byte, start_byte + offset + ch.len_utf8())
+            } else {
+                return;
+            }
+        } else {
+            return;
+        };
+
+        self.record_undo_snapshot(previous_text.clone());
+        self.editor_redo_stack.clear();
+        let mut new_text = previous_text.clone();
+        new_text.replace_range(delete_start..delete_end, "");
+        let caret_char = Self::char_index_from_byte(&new_text, delete_start);
+        self.apply_editor_text(new_text);
+        self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(caret_char)));
+    }
+
+    fn select_all_in_editor(&mut self) {
+        let total_chars = self.editor_preview.chars().count();
+        let range = CCursorRange::two(CCursor::new(0), CCursor::new(total_chars));
+        self.update_editor_selection(Some(range));
+        self.pending_editor_selection = Some(range);
+    }
+
     fn handle_macro_command(&mut self, item_key: &str) {
         match item_key {
             "menu.macro.start_recording" => self.start_macro_recording(),
@@ -1547,6 +1671,10 @@ impl RustNotePadApp {
         self.current_document_path = None;
         self.current_language_id = "plaintext".into();
         self.editor_preview.clear();
+        self.editor_undo_stack.clear();
+        self.editor_redo_stack.clear();
+        self.pending_editor_selection = None;
+        self.update_editor_selection(None);
         self.document_dirty = false;
         self.set_tab_dirty_state(&tab_id, false);
         self.document_index
@@ -1916,6 +2044,87 @@ impl RustNotePadApp {
         }
     }
 
+    fn record_undo_snapshot(&mut self, snapshot: String) {
+        if self
+            .editor_undo_stack
+            .last()
+            .map(|last| last == &snapshot)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.editor_undo_stack.push(snapshot);
+        if self.editor_undo_stack.len() > MAX_EDITOR_HISTORY {
+            self.editor_undo_stack.remove(0);
+        }
+    }
+
+    fn apply_editor_text(&mut self, new_text: String) {
+        if self.editor_preview == new_text {
+            return;
+        }
+        self.editor_preview = new_text;
+        self.update_editor_selection(None);
+        self.status.refresh_cursor(&self.editor_preview);
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.refresh_completions();
+        self.mark_document_dirty();
+    }
+
+    fn update_editor_selection(&mut self, selection: Option<CCursorRange>) {
+        self.editor_selection = selection;
+        self.status.selection = self
+            .editor_selection_char_range()
+            .map(|(start, end)| end.saturating_sub(start))
+            .unwrap_or(0);
+    }
+
+    fn editor_selection_char_range(&self) -> Option<(usize, usize)> {
+        let range = self.editor_selection?;
+        let [start, end] = range.sorted();
+        Some((start.index, end.index))
+    }
+
+    fn editor_selection_byte_range(&self) -> Option<(usize, usize)> {
+        let (start_char, end_char) = self.editor_selection_char_range()?;
+        let start_byte = Self::char_index_to_byte(&self.editor_preview, start_char);
+        let end_byte = Self::char_index_to_byte(&self.editor_preview, end_char);
+        Some((start_byte, end_byte))
+    }
+
+    fn selection_or_caret_char_bounds(&self) -> (usize, usize) {
+        self.editor_selection_char_range().unwrap_or_else(|| {
+            let caret = self.current_caret_char_index();
+            (caret, caret)
+        })
+    }
+
+    fn current_caret_char_index(&self) -> usize {
+        self.editor_selection
+            .map(|range| range.primary.index)
+            .unwrap_or_else(|| self.editor_preview.chars().count())
+    }
+
+    fn char_index_to_byte(text: &str, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        let mut count = 0usize;
+        for (byte_idx, _) in text.char_indices() {
+            if count == char_index {
+                return byte_idx;
+            }
+            count += 1;
+        }
+        text.len()
+    }
+
+    fn char_index_from_byte(text: &str, byte_index: usize) -> usize {
+        let clamped = byte_index.min(text.len());
+        text[..clamped].chars().count()
+    }
+
     fn preferences_profile_entries(&self) -> Vec<(String, String)> {
         vec![
             (
@@ -2224,6 +2433,10 @@ impl RustNotePadApp {
             self.document_index.remove_document(&old_id);
         }
         self.editor_preview = contents;
+        self.editor_undo_stack.clear();
+        self.editor_redo_stack.clear();
+        self.pending_editor_selection = None;
+        self.update_editor_selection(None);
         self.current_document_id = path.to_string();
         self.current_document_path = if Path::new(path).is_file() {
             Some(PathBuf::from(path))
@@ -2282,6 +2495,10 @@ impl RustNotePadApp {
                 self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
                 self.current_document_path = None;
                 self.document_dirty = false;
+                self.editor_undo_stack.clear();
+                self.editor_redo_stack.clear();
+                self.pending_editor_selection = None;
+                self.update_editor_selection(None);
                 self.document_index
                     .update_document(&self.current_document_id, &self.editor_preview);
                 self.status.refresh_cursor(&self.editor_preview);
@@ -2388,6 +2605,7 @@ impl RustNotePadApp {
                             let is_macro = section.title_key == "menu.macro";
                             let is_run = section.title_key == "menu.run";
                             let is_file = section.title_key == "menu.file";
+                            let is_edit = section.title_key == "menu.edit";
                             for item_key in section.item_keys {
                                 let label = self.text(item_key).into_owned();
                                 if is_settings {
@@ -2408,6 +2626,11 @@ impl RustNotePadApp {
                                 } else if is_file {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_file_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_edit {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_edit_command(item_key);
                                         ui.close_menu();
                                     }
                                 } else {
@@ -2481,26 +2704,15 @@ impl RustNotePadApp {
                         )
                         .clicked()
                     {
-                        match self.project_tree_store.load() {
-                            Ok(Some(tree)) => {
-                                self.project_tree = tree;
-                                log_info(self.localized_owned(
-                                    "Project tree reloaded".to_string(),
-                                    "專案樹已重新載入".to_string(),
-                                ));
-                            }
-                            Ok(None) => log_warn(self.localized_owned(
-                                "Project tree file missing".to_string(),
-                                "專案樹檔案不存在".to_string(),
-                            )),
-                            Err(err) => log_error(format!(
-                                "{}",
-                                self.localized_owned(
-                                    format!("Failed to reload project tree: {err}"),
-                                    format!("無法重新載入專案樹：{err}"),
-                                )
-                            )),
+                        let tree = build_filesystem_project_tree(&self.workspace_root, 4, 200);
+                        if let Err(err) = self.project_tree_store.save(&tree) {
+                            log_warn(format!("Failed to persist project tree: {err}"));
                         }
+                        self.project_tree = tree;
+                        log_info(self.localized_owned(
+                            "Project tree refreshed".to_string(),
+                            "專案樹已重新整理".to_string(),
+                        ));
                     }
                     if ui
                         .button(self.localized("Save Session", "儲存工作階段"))
@@ -2546,7 +2758,12 @@ impl RustNotePadApp {
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
                         for (idx, line) in self.editor_preview.lines().enumerate() {
-                            ui.label(format!("{:>4} {}", idx + 1, line));
+                            let placeholder = if line.is_empty() {
+                                "•".to_string()
+                            } else {
+                                line.chars().map(|_| '•').collect::<String>()
+                            };
+                            ui.label(format!("{:>4} {}", idx + 1, placeholder));
                         }
                     });
             });
@@ -2595,11 +2812,11 @@ impl RustNotePadApp {
 
                 match active_panel.as_str() {
                     "find_results" => {
-                        ui.label(self.text("panel.find_results.summary"));
-                        ui.label("search/src/lib.rs:42  let matches = engine.find_all(&options)?;");
-                        ui.label(
-                            "core/src/search_session.rs:155  document.set_contents(replaced_text);",
-                        );
+                        ui.label(self.localized("No search executed yet", "尚未執行搜尋"));
+                        ui.label(self.localized(
+                            "Use the search menu to run a query.",
+                            "請透過搜尋選單執行查詢。",
+                        ));
                     }
                     "console" => {
                         if let Some(error) = &self.run_last_error {
@@ -2854,22 +3071,36 @@ impl RustNotePadApp {
                                         color32_from_color(self.palette.panel),
                                     ))
                                     .show(ui, |ui| {
-                                        let mut buffer = self.editor_preview.clone();
+                                        let previous_text = self.editor_preview.clone();
+                                        let mut buffer = previous_text.clone();
+                                        let available = ui.available_size();
+                                        ui.set_min_size(available);
                                         let text_edit = egui::TextEdit::multiline(&mut buffer)
+                                            .id_source("primary_editor")
                                             .font(TextStyle::Monospace)
                                             .desired_rows(24)
                                             .desired_width(f32::INFINITY);
-                                        let response = ui.add_sized(ui.available_size(), text_edit);
-                                        if response.changed() {
-                                            self.editor_preview = buffer;
-                                            self.status.refresh_cursor(&self.editor_preview);
-                                            self.document_index.update_document(
-                                                &self.current_document_id,
-                                                &self.editor_preview,
-                                            );
-                                            self.refresh_completions();
-                                            self.mark_document_dirty();
+                                        let output = text_edit.show(ui);
+
+                                        if output.response.changed() && buffer != previous_text {
+                                            self.record_undo_snapshot(previous_text);
+                                            self.editor_redo_stack.clear();
+                                            self.apply_editor_text(buffer);
                                         }
+
+                                        let mut current_selection = output
+                                            .cursor_range
+                                            .map(|range| range.as_ccursor_range());
+
+                                        if let Some(pending) = self.pending_editor_selection.take()
+                                        {
+                                            let mut state = output.state.clone();
+                                            state.set_ccursor_range(Some(pending));
+                                            state.store(ui.ctx(), output.response.id);
+                                            current_selection = Some(pending);
+                                        }
+
+                                        self.update_editor_selection(current_selection);
                                     });
                             },
                         );
@@ -3498,10 +3729,10 @@ impl RustNotePadApp {
             );
             if ui
                 .add(
-                egui::DragValue::new(&mut self.preferences.autosave_interval_minutes)
-                    .clamp_range(1..=60)
-                    .speed(1.0)
-                    .suffix(suffix),
+                    egui::DragValue::new(&mut self.preferences.autosave_interval_minutes)
+                        .clamp_range(1..=60)
+                        .speed(1.0)
+                        .suffix(suffix),
                 )
                 .changed()
             {
@@ -3515,10 +3746,7 @@ impl RustNotePadApp {
             self.preferences_dirty = true;
         }
         if ui
-            .checkbox(
-                &mut self.preferences.highlight_active_line,
-                highlight_label,
-            )
+            .checkbox(&mut self.preferences.highlight_active_line, highlight_label)
             .changed()
         {
             self.preferences_dirty = true;
@@ -3848,6 +4076,8 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::text::CCursor;
+    use egui::text_edit::CCursorRange;
     use tempfile::tempdir_in;
 
     #[test]
@@ -3972,8 +4202,7 @@ mod tests {
         // 重設編輯器內容以確保測試過程獨立。
         app.editor_preview.clear();
         app.document_dirty = false;
-        app.document_index
-            .remove_document(&app.current_document_id);
+        app.document_index.remove_document(&app.current_document_id);
         app.status.refresh_cursor(&app.editor_preview);
         app.document_index
             .update_document(&app.current_document_id, "");
@@ -4078,11 +4307,9 @@ mod tests {
         );
 
         app.save_current_document();
-        let saved_contents =
-            std::fs::read_to_string(&save_path).expect("read updated saved file");
+        let saved_contents = std::fs::read_to_string(&save_path).expect("read updated saved file");
         assert_eq!(
-            saved_contents,
-            "First line\nSecond line\n",
+            saved_contents, "First line\nSecond line\n",
             "subsequent save should append latest edits"
         );
         assert!(
@@ -4101,11 +4328,7 @@ mod tests {
             .panes
             .iter()
             .find(|pane| pane.role == PaneRole::Primary)
-            .map(|pane| {
-                pane.tabs
-                    .iter()
-                    .any(|tab| tab.id == save_path_string)
-            })
+            .map(|pane| pane.tabs.iter().any(|tab| tab.id == save_path_string))
             .unwrap_or(false);
         assert!(
             !primary_has_saved_tab,
@@ -4151,6 +4374,60 @@ mod tests {
                 let _ = fs::remove_file(&profile_path);
             }
         }
+    }
+
+    #[test]
+    fn edit_commands_modify_editor_state() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+        app.editor_preview = "hello world".to_string();
+        app.editor_undo_stack.clear();
+        app.editor_redo_stack.clear();
+        app.editor_clipboard.clear();
+        app.update_editor_selection(Some(CCursorRange::two(CCursor::new(0), CCursor::new(5))));
+
+        app.perform_copy();
+        assert_eq!(app.editor_clipboard, "hello");
+
+        app.perform_cut();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.editor_preview, " world");
+
+        app.perform_paste();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.editor_preview, "hello world");
+
+        app.update_editor_selection(Some(CCursorRange::two(CCursor::new(5), CCursor::new(11))));
+        app.perform_delete();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.editor_preview, "hello");
+
+        app.select_all_in_editor();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.status.selection, app.editor_preview.chars().count());
+
+        app.perform_undo();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.editor_preview, "hello world");
+
+        app.perform_redo();
+        if let Some(pending) = app.pending_editor_selection.take() {
+            app.update_editor_selection(Some(pending));
+        }
+        assert_eq!(app.editor_preview, "hello");
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
