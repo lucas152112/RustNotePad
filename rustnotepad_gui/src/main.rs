@@ -29,7 +29,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write as IoWrite;
+use std::io::{self, Write as IoWrite};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -612,6 +612,66 @@ fn default_workspace_root() -> PathBuf {
         .join("rustnotepad_workspaces")
 }
 
+struct UserProfileStore {
+    path: PathBuf,
+    values: BTreeMap<String, String>,
+}
+
+impl UserProfileStore {
+    fn load(path: PathBuf) -> Self {
+        let mut values = BTreeMap::new();
+        if let Ok(contents) = fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = trimmed.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    if !key.is_empty() {
+                        values.insert(key.to_string(), value.to_string());
+                    }
+                }
+            }
+        }
+        Self { path, values }
+    }
+
+    fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(|value| value.as_str())
+    }
+
+    fn set(&mut self, key: &str, value: impl Into<String>) -> io::Result<()> {
+        self.values.insert(key.to_string(), value.into());
+        self.persist()
+    }
+
+    fn set_all<I>(&mut self, entries: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        for (key, value) in entries {
+            self.values.insert(key, value);
+        }
+        self.persist()
+    }
+
+    fn persist(&self) -> io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut payload = String::new();
+        for (key, value) in &self.values {
+            payload.push_str(key);
+            payload.push('=');
+            payload.push_str(value);
+            payload.push('\n');
+        }
+        fs::write(&self.path, payload)
+    }
+}
+
 struct StatusBarState {
     line: usize,
     column: usize,
@@ -675,6 +735,7 @@ impl StatusBarState {
 }
 
 struct RustNotePadApp {
+    profile_store: UserProfileStore,
     layout: LayoutConfig,
     editor_preview: String,
     bottom_tab_index: usize,
@@ -704,6 +765,7 @@ struct RustNotePadApp {
     current_document_id: String,
     current_language_id: String,
     preferences: PreferencesState,
+    preferences_dirty: bool,
     macro_recorder: MacroRecorder,
     macro_store: MacroStore,
     macro_messages: VecDeque<String>,
@@ -733,8 +795,23 @@ struct RustNotePadApp {
 
 impl Default for RustNotePadApp {
     fn default() -> Self {
-        let localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
+        let workspace_root = default_workspace_root();
+        let profile_path = workspace_root.join("profile.properties");
+        let profile_store = UserProfileStore::load(profile_path);
+
+        let mut localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
             .unwrap_or_else(|_| LocalizationManager::fallback());
+        if let Some(locale_code) = profile_store.get("locale") {
+            if let Some(idx) = localization
+                .locale_summaries()
+                .iter()
+                .position(|summary| summary.code == locale_code)
+            {
+                localization.set_active_by_index(idx);
+            } else {
+                log_warn(format!("Unknown locale in profile: {locale_code}"));
+            }
+        }
         let locale_summaries = localization.locale_summaries();
         let selected_locale = localization.active_index();
         let locale_display = locale_summaries
@@ -743,13 +820,18 @@ impl Default for RustNotePadApp {
             .unwrap_or_else(|| "English (en-US)".to_string());
         let sample_editor_content = localization.text("sample.editor_preview").into_owned();
 
-        let theme_manager = ThemeManager::load_from_dir("assets/themes").unwrap_or_else(|_| {
+        let mut theme_manager = ThemeManager::load_from_dir("assets/themes").unwrap_or_else(|_| {
             ThemeManager::new(vec![
                 ThemeDefinition::builtin_dark(),
                 ThemeDefinition::builtin_light(),
             ])
             .expect("built-in themes")
         });
+        if let Some(theme_name) = profile_store.get("theme") {
+            if theme_manager.set_active_by_name(theme_name).is_none() {
+                log_warn(format!("Unknown theme in profile: {theme_name}"));
+            }
+        }
         let palette = theme_manager.active_palette().clone();
         let layout = LayoutConfig::default();
         let active_panel_index = layout
@@ -774,7 +856,6 @@ impl Default for RustNotePadApp {
         let mut initial_document_id = PREVIEW_DOCUMENT_ID.to_string();
         let mut initial_language_id = PREVIEW_LANGUAGE_ID.to_string();
 
-        let workspace_root = default_workspace_root();
         if let Err(err) = fs::create_dir_all(&workspace_root) {
             log_warn(format!(
                 "Workspace directory creation failed at {}: {err}",
@@ -905,8 +986,31 @@ impl Default for RustNotePadApp {
         );
         status.set_locale(&locale_display);
 
+        let mut preferences = PreferencesState::default();
+        if let Some(value) = profile_store.get("preferences.autosave_enabled") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                preferences.autosave_enabled = parsed;
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.autosave_interval_minutes") {
+            if let Ok(parsed) = value.parse::<u32>() {
+                preferences.autosave_interval_minutes = parsed.clamp(1, 60);
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.show_line_numbers") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                preferences.show_line_numbers = parsed;
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.highlight_active_line") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                preferences.highlight_active_line = parsed;
+            }
+        }
+
         let default_macro_name = "Macro 1".to_string();
         let mut app = Self {
+            profile_store,
             layout,
             editor_preview: initial_editor_content.clone(),
             bottom_tab_index: active_panel_index,
@@ -935,7 +1039,8 @@ impl Default for RustNotePadApp {
             completion_results: Vec::new(),
             current_document_id: initial_document_id.clone(),
             current_language_id: initial_language_id.clone(),
-            preferences: PreferencesState::default(),
+            preferences,
+            preferences_dirty: false,
             macro_recorder: MacroRecorder::new(),
             macro_store: MacroStore::new(),
             macro_messages: VecDeque::new(),
@@ -968,6 +1073,7 @@ impl Default for RustNotePadApp {
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
+        app.seed_profile_defaults();
 
         if let Ok(locale_override) = env::var("RUSTNOTEPAD_LOCALE") {
             let summaries = app.localization.locale_summaries();
@@ -1810,6 +1916,79 @@ impl RustNotePadApp {
         }
     }
 
+    fn preferences_profile_entries(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "preferences.autosave_enabled".to_string(),
+                self.preferences.autosave_enabled.to_string(),
+            ),
+            (
+                "preferences.autosave_interval_minutes".to_string(),
+                self.preferences.autosave_interval_minutes.to_string(),
+            ),
+            (
+                "preferences.show_line_numbers".to_string(),
+                self.preferences.show_line_numbers.to_string(),
+            ),
+            (
+                "preferences.highlight_active_line".to_string(),
+                self.preferences.highlight_active_line.to_string(),
+            ),
+        ]
+    }
+
+    fn persist_preferences_if_dirty(&mut self) {
+        if !self.preferences_dirty {
+            return;
+        }
+        let entries = self.preferences_profile_entries();
+        if let Err(err) = self.profile_store.set_all(entries) {
+            log_warn(format!("Failed to persist preferences: {err}"));
+        } else {
+            self.preferences_dirty = false;
+        }
+    }
+
+    fn persist_locale(&mut self) {
+        let code = self.localization.active_code().to_string();
+        if let Err(err) = self.profile_store.set("locale", code) {
+            log_warn(format!("Failed to persist locale: {err}"));
+        }
+    }
+
+    fn persist_theme(&mut self) {
+        let theme_name = self.theme_manager.active_theme().name.clone();
+        if let Err(err) = self.profile_store.set("theme", theme_name) {
+            log_warn(format!("Failed to persist theme selection: {err}"));
+        }
+    }
+
+    fn seed_profile_defaults(&mut self) {
+        let mut entries = Vec::new();
+        if self.profile_store.get("locale").is_none() {
+            entries.push((
+                "locale".to_string(),
+                self.localization.active_code().to_string(),
+            ));
+        }
+        if self.profile_store.get("theme").is_none() {
+            entries.push((
+                "theme".to_string(),
+                self.theme_manager.active_theme().name.clone(),
+            ));
+        }
+        for (key, value) in self.preferences_profile_entries() {
+            if self.profile_store.get(&key).is_none() {
+                entries.push((key, value));
+            }
+        }
+        if !entries.is_empty() {
+            if let Err(err) = self.profile_store.set_all(entries) {
+                log_warn(format!("Failed to seed profile defaults: {err}"));
+            }
+        }
+    }
+
     fn format_indexed(&self, key: &str, values: &[String]) -> String {
         let mut text = self.text(key).into_owned();
         for (idx, value) in values.iter().enumerate() {
@@ -1959,6 +2138,7 @@ impl RustNotePadApp {
                 format!("介面語系已切換為 {}", summary.display_name),
             ));
         }
+        self.persist_locale();
         self.sample_editor_content = self.localization.text("sample.editor_preview").into_owned();
         if self.current_document_id == PREVIEW_DOCUMENT_ID {
             self.editor_preview = self.sample_editor_content.clone();
@@ -3238,6 +3418,9 @@ impl App for RustNotePadApp {
 
 impl Drop for RustNotePadApp {
     fn drop(&mut self) {
+        self.persist_preferences_if_dirty();
+        self.persist_locale();
+        self.persist_theme();
         self.persist_session();
     }
 }
@@ -3302,21 +3485,44 @@ impl RustNotePadApp {
         let suffix = self
             .text("settings.preferences.autosave_suffix")
             .to_string();
-        ui.checkbox(&mut self.preferences.autosave_enabled, autosave_label);
+        if ui
+            .checkbox(&mut self.preferences.autosave_enabled, autosave_label)
+            .changed()
+        {
+            self.preferences_dirty = true;
+        }
         ui.horizontal(|ui| {
             ui.label(
                 self.text("settings.preferences.autosave_interval")
                     .to_string(),
             );
-            ui.add(
+            if ui
+                .add(
                 egui::DragValue::new(&mut self.preferences.autosave_interval_minutes)
                     .clamp_range(1..=60)
                     .speed(1.0)
                     .suffix(suffix),
-            );
+                )
+                .changed()
+            {
+                self.preferences_dirty = true;
+            }
         });
-        ui.checkbox(&mut self.preferences.show_line_numbers, line_numbers_label);
-        ui.checkbox(&mut self.preferences.highlight_active_line, highlight_label);
+        if ui
+            .checkbox(&mut self.preferences.show_line_numbers, line_numbers_label)
+            .changed()
+        {
+            self.preferences_dirty = true;
+        }
+        if ui
+            .checkbox(
+                &mut self.preferences.highlight_active_line,
+                highlight_label,
+            )
+            .changed()
+        {
+            self.preferences_dirty = true;
+        }
         ui.add_space(12.0);
 
         // Render locale selector similar to Notepad++ preferences panel.
@@ -3355,6 +3561,7 @@ impl RustNotePadApp {
         }
         ui.add_space(12.0);
         ui.label(RichText::new(self.text("settings.preferences.note").to_string()).italics());
+        self.persist_preferences_if_dirty();
     }
 
     fn render_style_configurator(&mut self, ui: &mut egui::Ui) {
@@ -3380,6 +3587,7 @@ impl RustNotePadApp {
                 self.pending_theme_refresh = true;
                 self.status
                     .set_theme(&self.theme_manager.active_theme().name);
+                self.persist_theme();
             }
         }
         ui.add_space(12.0);
@@ -3903,6 +4111,46 @@ mod tests {
             !primary_has_saved_tab,
             "closed document should be removed from the primary pane"
         );
+    }
+
+    #[test]
+    fn locale_selection_persists_to_profile_file() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let profile_path = default_workspace_root().join("profile.properties");
+        let original_profile = fs::read_to_string(&profile_path).ok();
+        let _ = fs::remove_file(&profile_path);
+
+        {
+            let mut app = RustNotePadApp::default();
+            app.cjk_font_available = true;
+            let summaries = app.localization.locale_summaries();
+            let zh_tw_index = summaries
+                .iter()
+                .enumerate()
+                .find_map(|(idx, summary)| (summary.code == "zh-TW").then_some(idx))
+                .expect("zh-TW locale available");
+            app.apply_locale_change(zh_tw_index, &summaries);
+        }
+
+        let persisted = fs::read_to_string(&profile_path).expect("profile should be written");
+        assert!(
+            persisted
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("locale=zh-TW")),
+            "expected persisted locale entry, got: {persisted:?}"
+        );
+
+        match original_profile {
+            Some(contents) => {
+                fs::write(&profile_path, contents).expect("restore original profile");
+            }
+            None => {
+                let _ = fs::remove_file(&profile_path);
+            }
+        }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
