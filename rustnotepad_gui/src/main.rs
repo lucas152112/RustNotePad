@@ -559,7 +559,7 @@ fn populate_project_folder(
 
         let entry_path = entry.path();
         let name = entry.file_name().to_string_lossy().trim().to_string();
-        if name.is_empty() {
+        if name.is_empty() || name == ".rustnotepad" {
             continue;
         }
         let Ok(file_type) = entry.file_type() else {
@@ -619,33 +619,7 @@ fn populate_project_folder(
 }
 
 fn default_workspace_root() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = env::var_os("APPDATA") {
-            return PathBuf::from(appdata)
-                .join("RustNotePad")
-                .join("Workspaces");
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        if let Some(xdg_config) = env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(xdg_config)
-                .join("rustnotepad")
-                .join("workspaces");
-        }
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home)
-                .join(".config")
-                .join("rustnotepad")
-                .join("workspaces");
-        }
-    }
-
-    env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("rustnotepad_workspaces")
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 struct UserProfileStore {
@@ -2728,15 +2702,20 @@ impl RustNotePadApp {
                     for child in root_children.iter() {
                         self.render_project_node(ui, child, 0);
                     }
-                    ui.add_space(10.0);
-                    ui.separator();
-                    self.render_highlight_summary(ui);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    self.render_function_list_panel(ui);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    self.render_completion_panel(ui);
+                    let has_document = !self.editor_preview.trim().is_empty();
+                    if has_document {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        self.render_highlight_summary(ui);
+                        ui.add_space(10.0);
+                        ui.separator();
+                        self.render_function_list_panel(ui);
+                    }
+                    if has_document || !self.completion_results.is_empty() {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        self.render_completion_panel(ui);
+                    }
                     ui.add_space(10.0);
                     ui.separator();
                     self.render_macro_panel(ui);
@@ -2812,11 +2791,7 @@ impl RustNotePadApp {
 
                 match active_panel.as_str() {
                     "find_results" => {
-                        ui.label(self.localized("No search executed yet", "尚未執行搜尋"));
-                        ui.label(self.localized(
-                            "Use the search menu to run a query.",
-                            "請透過搜尋選單執行查詢。",
-                        ));
+                        // Intentionally blank until a search populates results.
                     }
                     "console" => {
                         if let Some(error) = &self.run_last_error {
@@ -3100,6 +3075,9 @@ impl RustNotePadApp {
                                             current_selection = Some(pending);
                                         }
 
+                                        if current_selection.is_none() {
+                                            current_selection = self.editor_selection;
+                                        }
                                         self.update_editor_selection(current_selection);
                                     });
                             },
