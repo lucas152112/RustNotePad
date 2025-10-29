@@ -2678,6 +2678,7 @@ dependencies = [
  "rustnotepad_project",
  "rustnotepad_runexec",
  "rustnotepad_settings",
+ "tempfile",
 ]
 
 [[package]]

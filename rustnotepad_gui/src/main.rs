@@ -3640,6 +3640,7 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir_in;
 
     #[test]
     fn switching_to_traditional_chinese_locale_does_not_panic() {
@@ -3685,6 +3686,222 @@ mod tests {
         assert!(
             app.font_warning.is_some(),
             "expected a font warning when CJK font is unavailable"
+        );
+    }
+
+    #[test]
+    fn print_preview_generates_visible_pages_in_gui_mode() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+        // Generate a multi-page Rust snippet to exercise preview rendering.
+        // 產生多頁的 Rust 範例程式碼來驗證預覽渲染流程。
+        let sample = (0..48)
+            .map(|idx| format!("fn example_{idx}() {{ println!(\"preview\"); }}\n"))
+            .collect::<String>();
+        app.editor_preview = sample;
+
+        app.open_print_preview();
+
+        assert!(
+            app.print_preview.visible,
+            "print preview window should become visible"
+        );
+        assert!(
+            app.print_preview.last_error.is_none(),
+            "print preview should not report errors, got {:?}",
+            app.print_preview.last_error
+        );
+        assert!(
+            app.print_preview.job_id.is_some(),
+            "print preview should assign a job id"
+        );
+        assert!(
+            app.print_preview.total_pages >= 1,
+            "print preview should calculate at least one page"
+        );
+
+        let pdf_len = app
+            .print_preview
+            .last_pdf
+            .as_ref()
+            .map(|pdf| pdf.len())
+            .expect("print preview should render PDF data");
+        assert!(
+            pdf_len > 0,
+            "print preview should produce non-empty PDF output"
+        );
+
+        assert!(
+            app.print_preview.cache.len() > 0,
+            "print preview cache should store rasterized pages"
+        );
+        let key = app
+            .print_preview
+            .current_key()
+            .expect("print preview should expose a current page key");
+        let cache_has_entry = {
+            let preview_state = &mut app.print_preview;
+            preview_state.cache.get(&key).is_some()
+        };
+        assert!(
+            cache_has_entry,
+            "current preview page should be retrievable from cache"
+        );
+    }
+
+    #[test]
+    fn macro_insert_text_updates_editor_state() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+
+        // Reset the editor buffer to isolate this scenario.
+        // 重設編輯器內容以確保測試過程獨立。
+        app.editor_preview.clear();
+        app.document_dirty = false;
+        app.document_index
+            .remove_document(&app.current_document_id);
+        app.status.refresh_cursor(&app.editor_preview);
+        app.document_index
+            .update_document(&app.current_document_id, "");
+
+        {
+            let mut executor = AppMacroExecutor { app: &mut app };
+            executor
+                .insert_text("sample_token alpha\nbeta segment\n")
+                .expect("macro inserts text");
+        }
+
+        assert!(
+            app.editor_preview.contains("sample_token"),
+            "macro insertion should append the supplied snippet"
+        );
+        assert!(
+            app.document_dirty,
+            "document should be marked dirty after macro insertion"
+        );
+        assert!(
+            app.status.lines >= 2,
+            "status bar should reflect multi-line content"
+        );
+        assert!(
+            app.macro_messages
+                .iter()
+                .any(|message| message.contains("Inserted")),
+            "macro log should record the insertion event"
+        );
+
+        let collected = app
+            .document_index
+            .collect("sample", false, 8)
+            .into_iter()
+            .map(|candidate| candidate.label)
+            .collect::<Vec<_>>();
+        assert!(
+            collected.iter().any(|label| label == "sample_token"),
+            "document index should expose the inserted token for completions, got {collected:?}"
+        );
+    }
+
+    #[test]
+    fn gui_document_lifecycle_covers_create_save_and_close() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let mut app = RustNotePadApp::default();
+
+        // Start from a clean workspace and create an untitled document.
+        // 起始於乾淨的工作空間並建立未命名文件。
+        app.new_document();
+        let temp_parent = workspace_root.join("target/test-artifacts/gui");
+        std::fs::create_dir_all(&temp_parent).expect("create temp parent directory");
+        let temp_dir = tempdir_in(&temp_parent).expect("temp directory in workspace");
+        let save_path = temp_dir.path().join("note.txt");
+        let save_path_string = save_path.to_string_lossy().to_string();
+
+        {
+            let mut executor = AppMacroExecutor { app: &mut app };
+            executor
+                .insert_text("First line\n")
+                .expect("insert initial content");
+        }
+
+        app.save_current_document();
+        assert!(
+            app.show_save_as_dialog,
+            "save without path should raise the save-as dialog"
+        );
+
+        app.save_dialog_path = save_path_string.clone();
+        assert!(
+            app.attempt_save_dialog(),
+            "save-as path should persist document without error"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&save_path).expect("read saved file"),
+            "First line\n",
+            "saved file should contain the initial content"
+        );
+        assert_eq!(
+            app.current_document_path.as_deref(),
+            Some(save_path.as_path()),
+            "document path should update after save-as"
+        );
+        assert!(
+            !app.document_dirty,
+            "document should be marked clean after save-as"
+        );
+
+        {
+            let mut executor = AppMacroExecutor { app: &mut app };
+            executor
+                .insert_text("Second line\n")
+                .expect("append additional content");
+        }
+        assert!(
+            app.document_dirty,
+            "editing should mark document as dirty before save"
+        );
+
+        app.save_current_document();
+        let saved_contents =
+            std::fs::read_to_string(&save_path).expect("read updated saved file");
+        assert_eq!(
+            saved_contents,
+            "First line\nSecond line\n",
+            "subsequent save should append latest edits"
+        );
+        assert!(
+            !app.document_dirty,
+            "document should be clean after saving to existing path"
+        );
+
+        app.close_active_document();
+        assert_ne!(
+            app.current_document_id.as_str(),
+            save_path_string.as_str(),
+            "closing the active tab should remove the saved document from focus"
+        );
+        let primary_has_saved_tab = app
+            .layout
+            .panes
+            .iter()
+            .find(|pane| pane.role == PaneRole::Primary)
+            .map(|pane| {
+                pane.tabs
+                    .iter()
+                    .any(|tab| tab.id == save_path_string)
+            })
+            .unwrap_or(false);
+        assert!(
+            !primary_has_saved_tab,
+            "closed document should be removed from the primary pane"
         );
     }
 }

@@ -23,3 +23,6 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 [[bin]]
 name = "rustnotepad"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.10"
