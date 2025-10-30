@@ -8,21 +8,29 @@
 - Cross-platform invocation and shell integration  
   跨平台啟動與 shell 整合
 
+## Usage examples / 使用範例
+- `rustnotepad -n42 -c5 src/lib.rs` – jump to line 42, column 5 in `src/lib.rs` on launch.  
+  `rustnotepad -n42 -c5 src/lib.rs` – 啟動時直接跳至 `src/lib.rs` 的第 42 行第 5 欄。
+- `rustnotepad --session sessions/last-good.rnsession --project work/project.json` – restore a saved session and project relative to the workspace.  
+  `rustnotepad --session sessions/last-good.rnsession --project work/project.json` – 以工作區相對路徑還原既有工作階段與專案。
+- `rustnotepad --workspace ~/code/docs --theme "Nordic Daylight" notes/todo.md` – switch workspace root, apply theme, and open a note.  
+  `rustnotepad --workspace ~/code/docs --theme "Nordic Daylight" notes/todo.md` – 切換工作區、套用主題並開啟筆記。
+
 ## Status Checklist / 進度檢查清單
-- [ ] `design.md` drafted and reviewed  
-  尚未完成 `design.md` 撰寫與審閱
-- [ ] CLI parser implemented  
-  CLI 解析器尚未實作
-- [ ] Integration with session/project subsystems  
-  與工作階段/專案子系統的整合尚未完成
-- [ ] Unit tests for argument parsing  
-  參數解析單元測試尚未完成
+- [x] `design.md` drafted and reviewed  
+  已完成 `design.md` 撰寫與盤點
+- [x] CLI parser implemented  
+  CLI 解析器已實作
+- [x] Integration with session/project subsystems  
+  已整合工作階段與專案子系統
+- [x] Unit tests for argument parsing  
+  參數解析單元測試已覆蓋
 - [ ] Integration tests for launch scenarios  
   啟動情境的整合測試尚待補齊
 - [ ] Documentation updated (`rustnotepad --help`)  
   `rustnotepad --help` 文件尚未更新
-- [ ] `compatibility.md` updated  
-  `compatibility.md` 尚待更新
+- [x] `compatibility.md` updated  
+  `compatibility.md` 已更新
 
 ## Artifacts / 產出清單
 - Design notes: `design.md`  

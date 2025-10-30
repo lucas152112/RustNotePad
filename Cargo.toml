@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "rustnotepad_gui",
+    "crates/cmdline",
     "crates/autocomplete",
     "crates/core",
     "crates/highlight",

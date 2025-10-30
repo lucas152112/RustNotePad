@@ -13,6 +13,7 @@ use rustnotepad_autocomplete::{
     CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
     LanguageDictionaryProvider, LspProvider, Snippet, SnippetProvider,
 };
+use rustnotepad_cmdline::{FileTarget, LaunchConfig, ThemeSpec};
 use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, RegexRule, TextRange};
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
@@ -49,6 +50,7 @@ use rustnotepad_printing::{
     run_print_job, HeaderFooterTemplate, PreviewCache, PreviewConfig, PrintColorMode,
     PrintJobOptions, PrintPreviewKey, SimplePaginator,
 };
+use serde_json;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
@@ -99,6 +101,50 @@ struct PrintPreviewState {
     last_pdf: Option<Vec<u8>>,
     last_error: Option<String>,
     generation: u64,
+}
+
+struct InstanceGuard {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl InstanceGuard {
+    fn acquire(workspace_root: &Path) -> io::Result<Self> {
+        let state_dir = workspace_root.join(".rustnotepad");
+        fs::create_dir_all(&state_dir)?;
+        let lock_path = state_dir.join("instance.lock");
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(file) => Ok(Self {
+                _file: file,
+                path: lock_path,
+            }),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "workspace {} is already locked by another instance",
+                    workspace_root.display()
+                ),
+            )),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                log_warn(format!(
+                    "Failed to remove instance lock {}: {err}",
+                    self.path.display()
+                ));
+            }
+        }
+    }
 }
 
 fn log_with_level(message: impl Into<String>, level: &str) {
@@ -810,7 +856,40 @@ struct RustNotePadApp {
 
 impl Default for RustNotePadApp {
     fn default() -> Self {
-        let workspace_root = default_workspace_root();
+        Self::new_with_workspace_root(default_workspace_root())
+    }
+}
+
+fn build_function_registry() -> ParserRegistry {
+    let mut registry = ParserRegistry::new();
+    let rust_rules = vec![
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Function,
+        )
+        .expect("rust function rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?struct\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Struct,
+        )
+        .expect("rust struct rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?enum\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
+            FunctionKind::Enum,
+        )
+        .expect("rust enum rule"),
+        RegexRule::new(
+            r"(?m)^\s*(?:pub\s+)?impl(?:<[^>]+>)?\s+(?P<name>[A-Za-z_][A-Za-z0-9_:<>]*)",
+            FunctionKind::Region,
+        )
+        .expect("rust impl rule"),
+    ];
+    registry.register_parser(PREVIEW_LANGUAGE_ID, Box::new(RegexParser::new(rust_rules)));
+    registry
+}
+
+impl RustNotePadApp {
+    fn new_with_workspace_root(workspace_root: PathBuf) -> Self {
         let profile_path = workspace_root.join("profile.properties");
         let profile_store = UserProfileStore::load(profile_path);
 
@@ -1057,37 +1136,353 @@ impl Default for RustNotePadApp {
 
         app
     }
-}
 
-fn build_function_registry() -> ParserRegistry {
-    let mut registry = ParserRegistry::new();
-    let rust_rules = vec![
-        RegexRule::new(
-            r"(?m)^\s*(?:pub\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-            FunctionKind::Function,
-        )
-        .expect("rust function rule"),
-        RegexRule::new(
-            r"(?m)^\s*(?:pub\s+)?struct\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-            FunctionKind::Struct,
-        )
-        .expect("rust struct rule"),
-        RegexRule::new(
-            r"(?m)^\s*(?:pub\s+)?enum\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)",
-            FunctionKind::Enum,
-        )
-        .expect("rust enum rule"),
-        RegexRule::new(
-            r"(?m)^\s*(?:pub\s+)?impl(?:<[^>]+>)?\s+(?P<name>[A-Za-z_][A-Za-z0-9_:<>]*)",
-            FunctionKind::Region,
-        )
-        .expect("rust impl rule"),
-    ];
-    registry.register_parser(PREVIEW_LANGUAGE_ID, Box::new(RegexParser::new(rust_rules)));
-    registry
-}
+    fn apply_launch_config(&mut self, config: &LaunchConfig) {
+        for flag in &config.raw_unknown {
+            log_warn(format!("Ignoring unknown CLI option: {flag}"));
+        }
 
-impl RustNotePadApp {
+        if config.suppress_plugins {
+            log_info("Plugin loading disabled via command-line flag");
+        }
+
+        if let Some(spec) = &config.theme {
+            self.apply_theme_spec(spec);
+        }
+
+        if let Some(project_path) = &config.project_path {
+            let resolved = self.resolve_path(project_path);
+            self.load_project_from_path(&resolved);
+        }
+
+        let mut session_restored = false;
+        if let Some(session_path) = &config.session_path {
+            let resolved = self.resolve_path(session_path);
+            session_restored = self.restore_session_from_path(&resolved);
+        } else if config.skip_session {
+            log_info("Session restore skipped due to -nosession flag");
+        } else {
+            session_restored = self.restore_default_session();
+        }
+
+        if !config.files.is_empty() {
+            if !session_restored {
+                self.prepare_primary_pane();
+            }
+            for target in &config.files {
+                self.open_file_target(target);
+            }
+        }
+
+        if session_restored || !config.files.is_empty() {
+            self.cleanup_placeholder_documents();
+        }
+
+        self.status.refresh_from_layout(&self.layout);
+    }
+
+    fn apply_theme_spec(&mut self, spec: &ThemeSpec) {
+        match spec {
+            ThemeSpec::Name(name) => {
+                if !self.activate_theme_by_name(name) {
+                    log_warn(format!(
+                        "Unable to locate theme '{}' requested via CLI",
+                        name
+                    ));
+                }
+            }
+            ThemeSpec::Path(path) => {
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                    if self.activate_theme_by_name(stem) {
+                        return;
+                    }
+                }
+                log_warn(format!(
+                    "Unable to apply theme from path {}; keeping current theme",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    fn activate_theme_by_name(&mut self, name: &str) -> bool {
+        if self.theme_manager.set_active_by_name(name).is_some() {
+            self.pending_theme_refresh = true;
+            let active_name = self.theme_manager.active_theme().name.clone();
+            self.status.set_theme(&active_name);
+            self.persist_theme();
+            log_info(format!("Theme switched to '{active_name}' from CLI"));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn load_project_from_path(&mut self, path: &Path) {
+        let store = ProjectTreeStore::new(path);
+        match store.load() {
+            Ok(Some(tree)) => {
+                self.project_tree = tree;
+                self.project_tree_store = store;
+                log_info(format!("Project tree loaded from {}", path.display()));
+            }
+            Ok(None) => {
+                log_warn(format!(
+                    "No project data found at {}; keeping existing tree",
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                log_warn(format!(
+                    "Failed to load project tree from {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    fn restore_default_session(&mut self) -> bool {
+        match self.session_store.load() {
+            Ok(Some(snapshot)) => {
+                if snapshot.is_empty() {
+                    return false;
+                }
+                self.prepare_primary_pane();
+                self.restore_session_snapshot(snapshot);
+                log_info("Session restored from default workspace snapshot");
+                true
+            }
+            Ok(None) => false,
+            Err(err) => {
+                log_warn(format!("Failed to load default session: {err}"));
+                false
+            }
+        }
+    }
+
+    fn restore_session_from_path(&mut self, path: &Path) -> bool {
+        match fs::read_to_string(path) {
+            Ok(contents) => match serde_json::from_str::<SessionSnapshot>(&contents) {
+                Ok(snapshot) => {
+                    if snapshot.is_empty() {
+                        log_warn(format!(
+                            "Session file {} contains no open tabs",
+                            path.display()
+                        ));
+                        return false;
+                    }
+                    self.prepare_primary_pane();
+                    self.restore_session_snapshot(snapshot);
+                    log_info(format!("Session restored from {}", path.display()));
+                    true
+                }
+                Err(err) => {
+                    log_warn(format!(
+                        "Failed to parse session file {}: {err}",
+                        path.display()
+                    ));
+                    false
+                }
+            },
+            Err(err) => {
+                log_warn(format!(
+                    "Failed to read session file {}: {err}",
+                    path.display()
+                ));
+                false
+            }
+        }
+    }
+
+    fn restore_session_snapshot(&mut self, snapshot: SessionSnapshot) {
+        let mut active_target: Option<(String, SessionTab)> = None;
+        if let Some(window) = snapshot.windows.first() {
+            for (idx, tab) in window.tabs.iter().enumerate() {
+                if let Some(path) = tab.path.as_ref() {
+                    let resolved = self.resolve_path(path);
+                    let path_string = resolved.to_string_lossy().to_string();
+                    let display = tab
+                        .display_name
+                        .as_deref()
+                        .or_else(|| resolved.file_name().and_then(|name| name.to_str()))
+                        .unwrap_or_else(|| path_string.as_str())
+                        .to_string();
+                    self.open_document(&path_string, &display);
+                    if Some(idx) == window.active_tab {
+                        active_target = Some((path_string.clone(), tab.clone()));
+                    }
+                }
+            }
+            if let Some((tab_id, tab)) = active_target {
+                if self.activate_tab(&tab_id) {
+                    self.apply_session_tab_state(&tab);
+                }
+            }
+        }
+    }
+
+    fn apply_session_tab_state(&mut self, tab: &SessionTab) {
+        let line = if tab.caret.line == 0 {
+            None
+        } else {
+            Some(tab.caret.line)
+        };
+        let column = if tab.caret.column == 0 {
+            None
+        } else {
+            Some(tab.caret.column)
+        };
+        self.apply_caret_position(line, column);
+    }
+
+    fn prepare_primary_pane(&mut self) {
+        let previous_id = self.current_document_id.clone();
+        for pane in &mut self.layout.panes {
+            pane.tabs.clear();
+            pane.active = None;
+        }
+        self.document_index.remove_document(&previous_id);
+        self.current_document_id = PREVIEW_DOCUMENT_ID.to_string();
+        self.current_document_path = None;
+        self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
+        self.editor_preview.clear();
+        self.editor_undo_stack.clear();
+        self.editor_redo_stack.clear();
+        self.pending_editor_selection = None;
+        self.update_editor_selection(None);
+        self.document_dirty = false;
+        self.status.refresh_cursor(&self.editor_preview);
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+    }
+
+    fn open_file_target(&mut self, target: &FileTarget) {
+        let resolved = self.resolve_path(&target.path);
+        let path_string = resolved.to_string_lossy().to_string();
+        let display = resolved
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| path_string.as_str())
+            .to_string();
+        self.open_document(&path_string, &display);
+        if let Some(language) = target.language.as_deref() {
+            self.apply_language_override(&path_string, language);
+        }
+        if target.read_only {
+            self.mark_tab_read_only(&path_string);
+        }
+        if target.line.is_some() || target.column.is_some() {
+            self.apply_caret_position(target.line, target.column);
+        }
+        log_info(format!("File opened via CLI: {}", resolved.display()));
+    }
+
+    fn resolve_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workspace_root.join(path)
+        }
+    }
+
+    fn apply_language_override(&mut self, tab_id: &str, hint: &str) {
+        if let Some(language_id) = language_id_from_hint(hint) {
+            self.set_tab_language_override(tab_id, language_id);
+        } else {
+            log_warn(format!(
+                "Unrecognized language hint '{}'; using detected language",
+                hint
+            ));
+        }
+    }
+
+    fn set_tab_language_override(&mut self, tab_id: &str, language_id: &str) {
+        let language_name = self.language_display_name(language_id);
+        for pane in &mut self.layout.panes {
+            if let Some(tab) = pane.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.language = Some(language_name.clone());
+            }
+        }
+        if self.current_document_id == tab_id {
+            self.current_language_id = language_id.to_string();
+            self.status
+                .set_document_language(self.language_display_name(language_id));
+            self.refresh_completions();
+        }
+    }
+
+    fn mark_tab_read_only(&mut self, tab_id: &str) {
+        for pane in &mut self.layout.panes {
+            if let Some(tab) = pane.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.is_locked = true;
+            }
+        }
+        if self.current_document_id == tab_id {
+            log_info("Current document set to read-only mode via CLI");
+        }
+    }
+
+    fn apply_caret_position(&mut self, line: Option<u32>, column: Option<u32>) {
+        let (char_index, resolved_line, resolved_column) =
+            Self::compute_char_position(&self.editor_preview, line, column);
+        let total_lines = self.editor_preview.lines().count().max(1);
+        self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(char_index)));
+        if let Some(pending) = self.pending_editor_selection.take() {
+            self.update_editor_selection(Some(pending));
+        }
+        self.status.line = resolved_line;
+        self.status.column = resolved_column;
+        self.status.lines = total_lines;
+        self.status.selection = 0;
+    }
+
+    fn compute_char_position(
+        text: &str,
+        line: Option<u32>,
+        column: Option<u32>,
+    ) -> (usize, usize, usize) {
+        let requested_line = line.unwrap_or(1).max(1) as usize;
+        let requested_column = column.unwrap_or(1).max(1) as usize;
+        let mut segments: Vec<&str> = text.split('\n').collect();
+        if segments.is_empty() {
+            segments.push("");
+        }
+        let total_lines = segments.len();
+        let line_index = requested_line
+            .saturating_sub(1)
+            .min(total_lines.saturating_sub(1));
+        let mut char_index = 0usize;
+        for idx in 0..line_index {
+            char_index += segments[idx].chars().count();
+            if idx < segments.len() - 1 {
+                char_index += 1;
+            } else if text.ends_with('\n') {
+                char_index += 1;
+            }
+        }
+        let line_text = segments.get(line_index).copied().unwrap_or("");
+        let line_len = line_text.chars().count();
+        let column_zero_based = requested_column.saturating_sub(1).min(line_len);
+        char_index += column_zero_based;
+        let resolved_line = line_index + 1;
+        let resolved_column = column_zero_based + 1;
+        (char_index, resolved_line, resolved_column)
+    }
+
+    fn cleanup_placeholder_documents(&mut self) {
+        let mut placeholders = Vec::new();
+        for pane in &self.layout.panes {
+            for tab in &pane.tabs {
+                if tab.id == PREVIEW_DOCUMENT_ID || tab.id.starts_with("untitled-") {
+                    placeholders.push((pane.role, tab.id.clone()));
+                }
+            }
+        }
+        for (role, tab_id) in placeholders {
+            self.close_tab(role, &tab_id);
+        }
+    }
+
     fn apply_theme_if_needed(&mut self, ctx: &egui::Context) {
         if self.pending_theme_refresh {
             self.apply_active_theme(ctx);
@@ -4033,15 +4428,66 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
 
 fn main() -> eframe::Result<()> {
     install_panic_logger();
-    log_info("Starting RustNotePad GUI preview");
+    let launch_config = match rustnotepad_cmdline::parse(std::env::args_os()) {
+        Ok(config) => config,
+        Err(err) => {
+            let message = format!("Failed to parse command-line arguments: {err}");
+            log_error(message.clone());
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
+
+    let workspace_root = launch_config
+        .workspace_root
+        .clone()
+        .unwrap_or_else(default_workspace_root);
+
+    let _instance_guard = if launch_config.multi_instance {
+        None
+    } else {
+        match InstanceGuard::acquire(&workspace_root) {
+            Ok(lock) => Some(lock),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let message = format!(
+                    "Another RustNotePad instance is already using workspace {}",
+                    workspace_root.display()
+                );
+                log_error(message.clone());
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+            Err(err) => {
+                let message = format!(
+                    "Failed to acquire workspace lock at {}: {err}",
+                    workspace_root.display()
+                );
+                log_error(message.clone());
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    log_info(format!(
+        "Starting RustNotePad (workspace: {}, multi-instance: {})",
+        workspace_root.display(),
+        launch_config.multi_instance
+    ));
     let options = NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]),
         ..Default::default()
     };
+    let config_for_app = launch_config.clone();
+    let workspace_for_app = workspace_root.clone();
     let result = eframe::run_native(
         APP_TITLE,
         options,
-        Box::new(|_cc| Box::<RustNotePadApp>::default()),
+        Box::new(move |_cc| {
+            let mut app = RustNotePadApp::new_with_workspace_root(workspace_for_app.clone());
+            app.apply_launch_config(&config_for_app);
+            Box::new(app)
+        }),
     );
     if let Err(err) = &result {
         log_error(format!("eframe shutdown error: {err}"));
