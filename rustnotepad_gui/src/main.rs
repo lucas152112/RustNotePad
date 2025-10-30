@@ -818,6 +818,7 @@ struct RustNotePadApp {
     autocomplete_engine: CompletionEngine,
     completion_prefix: String,
     completion_results: Vec<CompletionItem>,
+    autocomplete_panel_used: bool,
     current_document_id: String,
     current_language_id: String,
     preferences: PreferencesState,
@@ -852,6 +853,8 @@ struct RustNotePadApp {
     untitled_counter: usize,
     pending_exit: bool,
     print_preview: PrintPreviewState,
+    macro_panel_visible: bool,
+    run_panel_visible: bool,
 }
 
 impl Default for RustNotePadApp {
@@ -1084,6 +1087,7 @@ impl RustNotePadApp {
             autocomplete_engine,
             completion_prefix,
             completion_results: Vec::new(),
+            autocomplete_panel_used: false,
             current_document_id: PREVIEW_DOCUMENT_ID.to_string(),
             current_language_id: PREVIEW_LANGUAGE_ID.to_string(),
             preferences,
@@ -1118,6 +1122,8 @@ impl RustNotePadApp {
             untitled_counter: 1,
             pending_exit: false,
             print_preview: PrintPreviewState::new(),
+            macro_panel_visible: false,
+            run_panel_visible: false,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -1346,6 +1352,7 @@ impl RustNotePadApp {
         self.current_document_path = None;
         self.current_language_id = PREVIEW_LANGUAGE_ID.to_string();
         self.editor_preview.clear();
+        self.autocomplete_panel_used = false;
         self.editor_undo_stack.clear();
         self.editor_redo_stack.clear();
         self.pending_editor_selection = None;
@@ -1619,6 +1626,7 @@ impl RustNotePadApp {
         if self.macro_messages.len() >= MAX_MACRO_MESSAGES {
             self.macro_messages.pop_front();
         }
+        self.reveal_macro_panel();
         self.macro_messages.push_back(message.into());
     }
 
@@ -2040,6 +2048,7 @@ impl RustNotePadApp {
         self.current_document_path = None;
         self.current_language_id = "plaintext".into();
         self.editor_preview.clear();
+        self.autocomplete_panel_used = false;
         self.editor_undo_stack.clear();
         self.editor_redo_stack.clear();
         self.pending_editor_selection = None;
@@ -2175,6 +2184,7 @@ impl RustNotePadApp {
     }
 
     fn execute_run_spec(&mut self, title: String, spec: RunSpec) {
+        self.reveal_run_panel();
         let command = Self::format_run_command(&spec);
         let working_dir = spec.working_dir.clone();
         let env = spec
@@ -2265,6 +2275,7 @@ impl RustNotePadApp {
         if self.run_history.len() >= MAX_RUN_HISTORY {
             self.run_history.pop_back();
         }
+        self.reveal_run_panel();
         self.run_history.push_front(entry);
     }
 
@@ -2431,6 +2442,9 @@ impl RustNotePadApp {
     fn apply_editor_text(&mut self, new_text: String) {
         if self.editor_preview == new_text {
             return;
+        }
+        if !new_text.trim().is_empty() {
+            self.autocomplete_panel_used = true;
         }
         self.editor_preview = new_text;
         self.update_editor_selection(None);
@@ -3098,25 +3112,50 @@ impl RustNotePadApp {
                         self.render_project_node(ui, child, 0);
                     }
                     let has_document = !self.editor_preview.trim().is_empty();
+                    let mut optional_sections_rendered = false;
                     if has_document {
-                        ui.add_space(10.0);
-                        ui.separator();
-                        self.render_highlight_summary(ui);
-                        ui.add_space(10.0);
-                        ui.separator();
-                        self.render_function_list_panel(ui);
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_highlight_summary(ui);
+                            },
+                        );
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_function_list_panel(ui);
+                            },
+                        );
                     }
-                    if has_document || !self.completion_results.is_empty() {
-                        ui.add_space(10.0);
-                        ui.separator();
-                        self.render_completion_panel(ui);
+                    if self.should_show_completion_panel() {
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_completion_panel(ui);
+                            },
+                        );
                     }
-                    ui.add_space(10.0);
-                    ui.separator();
-                    self.render_macro_panel(ui);
-                    ui.add_space(10.0);
-                    ui.separator();
-                    self.render_run_panel(ui);
+                    if self.should_show_macro_panel() {
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_macro_panel(ui);
+                            },
+                        );
+                    }
+                    if self.should_show_run_panel() {
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_run_panel(ui);
+                            },
+                        );
+                    }
                 });
             });
     }
@@ -3841,6 +3880,44 @@ impl RustNotePadApp {
             "Settings apply to all presets in this preview. Production builds will allow per-command overrides.",
             "此預覽版設定會套用到所有預設指令，正式版會提供每個指令的獨立設定。",
         ));
+    }
+
+    fn should_show_completion_panel(&self) -> bool {
+        self.autocomplete_panel_used && !self.editor_preview.trim().is_empty()
+    }
+
+    fn should_show_macro_panel(&self) -> bool {
+        self.macro_panel_visible
+            || self.macro_recorder.is_recording()
+            || !self.macro_messages.is_empty()
+            || !self.macro_live_events.is_empty()
+    }
+
+    fn should_show_run_panel(&self) -> bool {
+        self.run_panel_visible || !self.run_history.is_empty() || self.run_last_error.is_some()
+    }
+
+    fn reveal_macro_panel(&mut self) {
+        self.macro_panel_visible = true;
+    }
+
+    fn reveal_run_panel(&mut self) {
+        self.run_panel_visible = true;
+    }
+
+    fn render_sidebar_section<F>(&mut self, ui: &mut egui::Ui, has_previous: &mut bool, render: F)
+    where
+        F: FnOnce(&mut Self, &mut egui::Ui),
+    {
+        if *has_previous {
+            ui.add_space(10.0);
+            ui.separator();
+        } else {
+            ui.add_space(10.0);
+            ui.separator();
+            *has_previous = true;
+        }
+        render(self, ui);
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
