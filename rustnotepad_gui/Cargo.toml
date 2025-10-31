@@ -17,6 +17,9 @@ rustnotepad_runexec = { path = "../crates/runexec" }
 rustnotepad_project = { path = "../crates/project" }
 rustnotepad_printing = { path = "../crates/printing" }
 rustnotepad_cmdline = { path = "../crates/cmdline" }
+rustnotepad_plugin_wasm = { path = "../crates/plugin_wasm" }
+rustnotepad_plugin_winabi = { path = "../crates/plugin_winabi" }
+rustnotepad_plugin_host = { path = "../crates/plugin_host" }
 ab_glyph = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.24", default-features = false, features = ["png"] }

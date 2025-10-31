@@ -7,6 +7,8 @@
   WASM 宿主的能力限制檢查
 - Plugin metadata validation  
   外掛後設資料驗證
+- Plugin discovery state toggles (`cargo test -p rustnotepad_gui`)  
+  外掛掃描與啟用狀態切換（`cargo test -p rustnotepad_gui`）
 
 ## Integration tests / 整合測試
 - Load/unload cycles for DLL & WASM plugins  
@@ -29,5 +31,7 @@
   `cargo test --package plugin_winabi`
 - `cargo test --package plugin_wasm`  
   `cargo test --package plugin_wasm`
+- `cargo test --package plugin_host`  
+  `cargo test --package plugin_host`
 - Automated plugin harness scripts under `scripts/dev`  
   `scripts/dev` 下的外掛自動化腳本

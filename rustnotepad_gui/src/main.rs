@@ -18,6 +18,16 @@ use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, Regex
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
 use rustnotepad_macros::{MacroError, MacroExecutor, MacroPlayer, MacroRecorder, MacroStore};
+use rustnotepad_plugin_host::{CommandOutcome, WasmPluginRuntime};
+use rustnotepad_plugin_wasm::{
+    discover as discover_wasm_plugins, Capability, CapabilityPolicy as WasmCapabilityPolicy,
+    Inventory as WasmInventory, WasmPluginPackage,
+    DEFAULT_RELATIVE_ROOT as WASM_PLUGIN_RELATIVE_ROOT,
+};
+use rustnotepad_plugin_winabi::{
+    discover as discover_win_plugins, PluginDescriptor as WinPluginDescriptor,
+    DEFAULT_RELATIVE_ROOT as WIN_PLUGIN_RELATIVE_ROOT,
+};
 use rustnotepad_project::{
     AutosaveManifest, ProjectNode, ProjectNodeDraft, ProjectNodeId, ProjectNodeKind, ProjectTree,
     ProjectTreeStore, SessionCaret, SessionScroll, SessionSnapshot, SessionStore, SessionTab,
@@ -101,6 +111,392 @@ struct PrintPreviewState {
     last_pdf: Option<Vec<u8>>,
     last_error: Option<String>,
     generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PluginIdentifier {
+    Wasm(String),
+    Windows(String),
+    Failure(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginKind {
+    Wasm,
+    Windows,
+}
+
+impl PluginKind {
+    fn sort_key(self) -> u8 {
+        match self {
+            PluginKind::Wasm => 0,
+            PluginKind::Windows => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PluginRecord {
+    identifier: PluginIdentifier,
+    name: String,
+    version: Option<String>,
+    description: Option<String>,
+    kind: PluginKind,
+    location: PathBuf,
+    capabilities: Vec<Capability>,
+    enabled: bool,
+    can_toggle: bool,
+    issue: Option<(String, String)>,
+    size_on_disk: Option<u64>,
+}
+
+impl PluginRecord {
+    fn capability_labels(&self) -> Vec<String> {
+        self.capabilities
+            .iter()
+            .map(|cap| cap.to_string())
+            .collect()
+    }
+}
+
+struct PluginSystem {
+    wasm_root: PathBuf,
+    win_root: PathBuf,
+    wasm_inventory: WasmInventory,
+    win_plugins: Vec<WinPluginDescriptor>,
+    enabled: bool,
+    wasm_policy: WasmCapabilityPolicy,
+    wasm_enabled: HashMap<String, bool>,
+    win_enabled: HashMap<String, bool>,
+}
+
+impl PluginSystem {
+    fn new(workspace_root: &Path) -> Self {
+        let mut system = Self {
+            wasm_root: workspace_root.join(WASM_PLUGIN_RELATIVE_ROOT),
+            win_root: workspace_root.join(WIN_PLUGIN_RELATIVE_ROOT),
+            wasm_inventory: WasmInventory::default(),
+            win_plugins: Vec::new(),
+            enabled: true,
+            wasm_policy: WasmCapabilityPolicy::locked_down(),
+            wasm_enabled: HashMap::new(),
+            win_enabled: HashMap::new(),
+        };
+        system.refresh();
+        system
+    }
+
+    fn normalize_path(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
+    fn is_wasm_enabled(&self, id: &str) -> bool {
+        self.wasm_enabled.get(id).copied().unwrap_or(true)
+    }
+
+    fn is_windows_enabled(&self, key: &str) -> bool {
+        self.win_enabled.get(key).copied().unwrap_or(true)
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn records(&self) -> Vec<PluginRecord> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut records = Vec::new();
+        for plugin in &self.wasm_inventory.plugins {
+            let enabled = self.is_wasm_enabled(&plugin.manifest.id);
+            records.push(PluginRecord {
+                identifier: PluginIdentifier::Wasm(plugin.manifest.id.clone()),
+                name: plugin.manifest.name.clone(),
+                version: Some(plugin.manifest.version.clone()),
+                description: plugin.manifest.description.clone(),
+                kind: PluginKind::Wasm,
+                location: plugin.root_dir.clone(),
+                capabilities: plugin.manifest.capabilities.clone(),
+                enabled,
+                can_toggle: true,
+                issue: None,
+                size_on_disk: None,
+            });
+        }
+        for failure in &self.wasm_inventory.failures {
+            let name = failure
+                .path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("WASM Plugin")
+                .to_string();
+            records.push(PluginRecord {
+                identifier: PluginIdentifier::Failure(Self::normalize_path(&failure.path)),
+                name,
+                version: None,
+                description: None,
+                kind: PluginKind::Wasm,
+                location: failure.path.clone(),
+                capabilities: Vec::new(),
+                enabled: false,
+                can_toggle: false,
+                issue: Some((failure.message.clone(), failure.message.clone())),
+                size_on_disk: None,
+            });
+        }
+        for descriptor in &self.win_plugins {
+            match descriptor {
+                WinPluginDescriptor::Binary { path, file_size } => {
+                    let key = Self::normalize_path(path);
+                    let enabled = self.is_windows_enabled(&key);
+                    let name = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("Windows Plugin")
+                        .to_string();
+                    records.push(PluginRecord {
+                        identifier: PluginIdentifier::Windows(key),
+                        name,
+                        version: None,
+                        description: None,
+                        kind: PluginKind::Windows,
+                        location: path.clone(),
+                        capabilities: Vec::new(),
+                        enabled,
+                        can_toggle: true,
+                        issue: None,
+                        size_on_disk: Some(*file_size),
+                    });
+                }
+                WinPluginDescriptor::MetadataOnly { path } => {
+                    let name = path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("Windows Plugin")
+                        .to_string();
+                    records.push(PluginRecord {
+                        identifier: PluginIdentifier::Failure(Self::normalize_path(path)),
+                        name,
+                        version: None,
+                        description: None,
+                        kind: PluginKind::Windows,
+                        location: path.clone(),
+                        capabilities: Vec::new(),
+                        enabled: false,
+                        can_toggle: false,
+                        issue: Some((
+                            "DLL not found in directory".to_string(),
+                            "找不到資料夾內的 DLL 檔案".to_string(),
+                        )),
+                        size_on_disk: None,
+                    });
+                }
+            }
+        }
+        records.sort_by(|a, b| {
+            a.kind
+                .sort_key()
+                .cmp(&b.kind.sort_key())
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        records
+    }
+
+    fn set_plugin_enabled(&mut self, identifier: &PluginIdentifier, enabled: bool) -> bool {
+        match identifier {
+            PluginIdentifier::Wasm(id) => {
+                let previous = self.is_wasm_enabled(id);
+                if previous != enabled {
+                    self.wasm_enabled.insert(id.clone(), enabled);
+                    log_info(format!(
+                        "WASM plugin {} {}",
+                        id,
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                    return true;
+                }
+            }
+            PluginIdentifier::Windows(key) => {
+                let previous = self.is_windows_enabled(key);
+                if previous != enabled {
+                    self.win_enabled.insert(key.clone(), enabled);
+                    log_info(format!(
+                        "Windows plugin {} {}",
+                        key,
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                    return true;
+                }
+            }
+            PluginIdentifier::Failure(_) => {}
+        }
+        false
+    }
+
+    fn rescan(&mut self) {
+        if self.enabled {
+            self.refresh();
+            log_info("Plugin directories rescanned");
+        } else {
+            log_warn("Cannot rescan plugins while system is disabled");
+        }
+    }
+
+    fn enabled_wasm_packages(&self) -> Vec<WasmPluginPackage> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        self.wasm_inventory
+            .plugins
+            .iter()
+            .filter(|pkg| self.is_wasm_enabled(&pkg.manifest.id))
+            .cloned()
+            .collect()
+    }
+
+    fn restore_from_profile(&mut self, profile: &UserProfileStore) {
+        for package in &self.wasm_inventory.plugins {
+            if let Some(value) =
+                profile.get_bool(&format!("plugin.wasm.{}.enabled", package.manifest.id))
+            {
+                self.wasm_enabled.insert(package.manifest.id.clone(), value);
+            }
+        }
+        for descriptor in &self.win_plugins {
+            if let WinPluginDescriptor::Binary { path, .. } = descriptor {
+                let key = Self::normalize_path(path);
+                if let Some(value) = profile.get_bool(&format!("plugin.win.{}.enabled", key)) {
+                    self.win_enabled.insert(key, value);
+                }
+            }
+        }
+    }
+
+    fn refresh(&mut self) {
+        if !self.enabled {
+            self.wasm_inventory = WasmInventory::default();
+            self.win_plugins.clear();
+            return;
+        }
+
+        match discover_wasm_plugins(&self.wasm_root, &self.wasm_policy) {
+            Ok(inventory) => {
+                self.log_wasm_outcome(&inventory);
+                self.wasm_inventory = inventory;
+                self.wasm_enabled.retain(|id, _| {
+                    self.wasm_inventory
+                        .plugins
+                        .iter()
+                        .any(|pkg| pkg.manifest.id == *id)
+                });
+                for plugin in &self.wasm_inventory.plugins {
+                    self.wasm_enabled
+                        .entry(plugin.manifest.id.clone())
+                        .or_insert(true);
+                }
+            }
+            Err(err) => {
+                log_warn(format!(
+                    "Failed to scan WASM plugins in {}: {err}",
+                    self.wasm_root.display()
+                ));
+                self.wasm_inventory = WasmInventory::default();
+            }
+        }
+
+        match discover_win_plugins(&self.win_root) {
+            Ok(descriptors) => {
+                if !descriptors.is_empty() {
+                    log_info(format!(
+                        "Found {} Windows plugin artifact(s) in {}",
+                        descriptors.len(),
+                        self.win_root.display()
+                    ));
+                }
+                self.win_plugins = descriptors;
+                self.win_enabled.retain(|key, _| {
+                    self.win_plugins.iter().any(|descriptor| match descriptor {
+                        WinPluginDescriptor::Binary { path, .. } => {
+                            Self::normalize_path(path) == *key
+                        }
+                        _ => false,
+                    })
+                });
+                for descriptor in &self.win_plugins {
+                    if let WinPluginDescriptor::Binary { path, .. } = descriptor {
+                        let key = Self::normalize_path(path);
+                        self.win_enabled.entry(key).or_insert(true);
+                    }
+                }
+            }
+            Err(err) => {
+                log_warn(err.to_string());
+                self.win_plugins.clear();
+            }
+        }
+    }
+
+    fn log_wasm_outcome(&self, inventory: &WasmInventory) {
+        if inventory.plugins.is_empty() {
+            if inventory.failures.is_empty() {
+                return;
+            }
+            log_warn(format!(
+                "WASM plugin scan encountered {} failure(s); no plugins loaded",
+                inventory.failures.len()
+            ));
+        } else {
+            log_info(format!(
+                "Loaded {} WASM plugin(s) from {}",
+                inventory.plugins.len(),
+                self.wasm_root.display()
+            ));
+            for plugin in &inventory.plugins {
+                log_info(format!(
+                    "WASM plugin ready: {} v{} ({})",
+                    plugin.manifest.name, plugin.manifest.version, plugin.manifest.id
+                ));
+            }
+        }
+
+        for failure in &inventory.failures {
+            log_warn(format!(
+                "Failed to load plugin at {}: {}",
+                failure.path.display(),
+                failure.message
+            ));
+        }
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if enabled {
+            self.refresh();
+            log_info("Plugin system enabled for this session");
+        } else {
+            self.wasm_inventory = WasmInventory::default();
+            self.win_plugins.clear();
+            log_info("Plugin system disabled via command-line flag");
+        }
+    }
+
+    #[allow(dead_code)]
+    fn wasm_plugins(&self) -> &[rustnotepad_plugin_wasm::WasmPluginPackage] {
+        &self.wasm_inventory.plugins
+    }
+
+    #[allow(dead_code)]
+    fn wasm_failures(&self) -> &[rustnotepad_plugin_wasm::PluginLoadFailure] {
+        &self.wasm_inventory.failures
+    }
+
+    #[allow(dead_code)]
+    fn win_plugins(&self) -> &[WinPluginDescriptor] {
+        &self.win_plugins
+    }
 }
 
 struct InstanceGuard {
@@ -698,6 +1094,12 @@ impl UserProfileStore {
         self.values.get(key).map(|value| value.as_str())
     }
 
+    fn get_bool(&self, key: &str) -> Option<bool> {
+        self.values
+            .get(key)
+            .and_then(|value| value.parse::<bool>().ok())
+    }
+
     fn set(&mut self, key: &str, value: impl Into<String>) -> io::Result<()> {
         self.values.insert(key.to_string(), value.into());
         self.persist()
@@ -855,6 +1257,9 @@ struct RustNotePadApp {
     print_preview: PrintPreviewState,
     macro_panel_visible: bool,
     run_panel_visible: bool,
+    plugin_system: PluginSystem,
+    plugin_runtime: Option<WasmPluginRuntime>,
+    plugin_status_message: Option<String>,
 }
 
 impl Default for RustNotePadApp {
@@ -1059,6 +1464,15 @@ impl RustNotePadApp {
         }
 
         let default_macro_name = "Macro 1".to_string();
+        let mut plugin_system = PluginSystem::new(&workspace_root);
+        plugin_system.restore_from_profile(&profile_store);
+        let plugin_runtime = match WasmPluginRuntime::new() {
+            Ok(runtime) => Some(runtime),
+            Err(err) => {
+                log_warn(format!("Failed to initialize WASM plugin runtime: {err}"));
+                None
+            }
+        };
         let mut app = Self {
             profile_store,
             layout,
@@ -1124,6 +1538,9 @@ impl RustNotePadApp {
             print_preview: PrintPreviewState::new(),
             macro_panel_visible: false,
             run_panel_visible: false,
+            plugin_system,
+            plugin_runtime,
+            plugin_status_message: None,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -1139,6 +1556,7 @@ impl RustNotePadApp {
             }
         }
         app.new_document();
+        app.reload_wasm_plugins();
 
         app
     }
@@ -1148,9 +1566,8 @@ impl RustNotePadApp {
             log_warn(format!("Ignoring unknown CLI option: {flag}"));
         }
 
-        if config.suppress_plugins {
-            log_info("Plugin loading disabled via command-line flag");
-        }
+        self.plugin_system.set_enabled(!config.suppress_plugins);
+        self.reload_wasm_plugins();
 
         if let Some(spec) = &config.theme {
             self.apply_theme_spec(spec);
@@ -1185,6 +1602,60 @@ impl RustNotePadApp {
         }
 
         self.status.refresh_from_layout(&self.layout);
+    }
+
+    fn reload_wasm_plugins(&mut self) {
+        if !self.plugin_system.is_enabled() {
+            self.plugin_status_message = Some(self.localized(
+                "Plugins are disabled; runtime not initialized.",
+                "外掛已停用，執行期未啟動。",
+            ));
+            if let Some(runtime) = &mut self.plugin_runtime {
+                if let Err(err) = runtime.load_packages(&[]) {
+                    log_warn(format!("Failed to clear WASM runtime: {err}"));
+                }
+            }
+            return;
+        }
+        if let Some(runtime) = &mut self.plugin_runtime {
+            let packages = self.plugin_system.enabled_wasm_packages();
+            if let Err(err) = runtime.load_packages(&packages) {
+                let message = self.localized_owned(
+                    format!("Failed to load WASM plugins: {err}"),
+                    format!("載入 WASM 外掛失敗：{err}"),
+                );
+                log_warn(&message);
+                self.plugin_status_message = Some(message);
+            } else if packages.is_empty() {
+                self.plugin_status_message = Some(self.localized(
+                    "No WASM plugins are currently enabled.",
+                    "目前沒有啟用的 WASM 外掛。",
+                ));
+            } else {
+                self.plugin_status_message = Some(
+                    self.localized("WASM plugins loaded successfully.", "WASM 外掛已成功載入。"),
+                );
+            }
+        } else {
+            self.plugin_status_message = Some(self.localized(
+                "WASM runtime unavailable; plugins cannot run.",
+                "WASM 執行期無法使用，外掛無法執行。",
+            ));
+        }
+    }
+
+    fn persist_plugin_state(&mut self, identifier: &PluginIdentifier, enabled: bool) {
+        let key = match identifier {
+            PluginIdentifier::Wasm(id) => format!("plugin.wasm.{id}.enabled"),
+            PluginIdentifier::Windows(path) => format!("plugin.win.{path}.enabled"),
+            PluginIdentifier::Failure(_) => return,
+        };
+        if let Err(err) = self.profile_store.set(&key, enabled.to_string()) {
+            log_warn(format!(
+                "Failed to persist plugin preference {}: {}",
+                key, err
+            ));
+        }
     }
 
     fn apply_theme_spec(&mut self, spec: &ThemeSpec) {
@@ -4137,6 +4608,12 @@ impl RustNotePadApp {
                             let label = self.text(key).to_string();
                             ui.selectable_value(&mut self.active_settings_page, *page, label);
                         }
+                        let plugins_label = self.localized("Plugins", "外掛");
+                        ui.selectable_value(
+                            &mut self.active_settings_page,
+                            SettingsPage::Plugins,
+                            plugins_label,
+                        );
                     });
                     ui.separator();
                     ui.vertical(|ui| {
@@ -4150,6 +4627,7 @@ impl RustNotePadApp {
                             SettingsPage::ContextMenu => {
                                 self.render_placeholder_page(ui, "settings.context.placeholder")
                             }
+                            SettingsPage::Plugins => self.render_plugins_page(ui),
                         }
                     });
                 });
@@ -4338,6 +4816,202 @@ impl RustNotePadApp {
                     });
                 });
             self.show_save_as_dialog = if should_close { false } else { open };
+        }
+    }
+
+    fn render_plugins_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading(self.localized("Plugin Management", "外掛管理"));
+        ui.separator();
+
+        if let Some(message) = &self.plugin_status_message {
+            ui.colored_label(Color32::LIGHT_BLUE, message);
+            ui.add_space(6.0);
+        }
+
+        if !self.plugin_system.is_enabled() {
+            ui.label(self.localized(
+                "Plugins are disabled for this session (command-line flag)",
+                "本次工作階段已透過命令列旗標停用外掛",
+            ));
+            if ui
+                .button(self.localized("Enable plugins now", "立即啟用外掛"))
+                .clicked()
+            {
+                self.plugin_system.set_enabled(true);
+                self.reload_wasm_plugins();
+            }
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            if ui
+                .button(self.localized("Rescan plugin directories", "重新掃描外掛資料夾"))
+                .clicked()
+            {
+                self.plugin_system.rescan();
+                self.plugin_system.restore_from_profile(&self.profile_store);
+                self.reload_wasm_plugins();
+            }
+            ui.label(self.localized(
+                "Discovered plugins are listed below.",
+                "下方列出已偵測到的外掛。",
+            ));
+        });
+        ui.add_space(8.0);
+
+        let records = self.plugin_system.records();
+        if records.is_empty() {
+            ui.label(self.localized(
+                "No plugins were found under the workspace plugin directories.",
+                "在工作區的外掛資料夾中找不到外掛。",
+            ));
+            return;
+        }
+
+        for record in records {
+            ui.group(|group| {
+                let mut enabled = record.enabled;
+                let kind_label = match record.kind {
+                    PluginKind::Wasm => self.localized("WASM", "WASM"),
+                    PluginKind::Windows => self.localized("Windows DLL", "Windows DLL"),
+                };
+                group.horizontal(|row| {
+                    let checkbox = egui::Checkbox::new(
+                        &mut enabled,
+                        format!("{} ({})", record.name, kind_label),
+                    );
+                    let response = if record.can_toggle {
+                        row.add(checkbox)
+                    } else {
+                        row.add_enabled(false, checkbox)
+                    };
+                    if let Some(version) = &record.version {
+                        row.label(self.localized_owned(
+                            format!("Version {}", version),
+                            format!("版本 {}", version),
+                        ));
+                    }
+                    if response.changed() && record.can_toggle {
+                        if self
+                            .plugin_system
+                            .set_plugin_enabled(&record.identifier, enabled)
+                        {
+                            self.persist_plugin_state(&record.identifier, enabled);
+                            self.reload_wasm_plugins();
+                        }
+                    }
+                });
+                if let Some(description) = &record.description {
+                    group.label(description);
+                }
+                group.label(self.localized_owned(
+                    format!("Location: {}", record.location.display()),
+                    format!("路徑：{}", record.location.display()),
+                ));
+                if let Some(size) = record.size_on_disk {
+                    group.label(self.localized_owned(
+                        format!("Size: {} bytes", size),
+                        format!("大小：{} 位元組", size),
+                    ));
+                }
+                let capabilities = record.capability_labels();
+                if !capabilities.is_empty() {
+                    group.label(self.localized_owned(
+                        format!("Capabilities: {}", capabilities.join(", ")),
+                        format!("能力：{}", capabilities.join("、")),
+                    ));
+                }
+                if let Some((en, zh)) = &record.issue {
+                    group.colored_label(
+                        Color32::YELLOW,
+                        self.localized_owned(en.clone(), zh.clone()),
+                    );
+                }
+
+                if let (PluginIdentifier::Wasm(ref plugin_id), true) =
+                    (&record.identifier, record.enabled)
+                {
+                    self.render_wasm_command_controls(group, plugin_id);
+                }
+            });
+            ui.add_space(6.0);
+        }
+    }
+
+    fn render_wasm_command_controls(&mut self, ui: &mut egui::Ui, plugin_id: &str) {
+        if self.plugin_runtime.is_none() {
+            ui.label(self.localized(
+                "WASM runtime is unavailable; commands cannot run.",
+                "WASM 執行期不可用，無法執行任何命令。",
+            ));
+            return;
+        }
+
+        let mut command_defs = Vec::new();
+        if let Some(runtime) = self.plugin_runtime.as_mut() {
+            if let Some(instance) = runtime.plugin_mut(plugin_id) {
+                command_defs = instance.commands().to_vec();
+            }
+        }
+
+        if command_defs.is_empty() {
+            ui.label(self.localized(
+                "This plugin does not declare commands.",
+                "此外掛未宣告任何命令。",
+            ));
+            return;
+        }
+
+        ui.separator();
+        ui.label(self.localized("Commands", "可用命令"));
+        for command in command_defs {
+            let button_label = self.localized_owned(
+                format!("Run {}", command.name),
+                format!("執行 {}", command.name),
+            );
+            let response = ui.button(button_label);
+            ui.label(
+                command
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| self.localized("No description provided.", "未提供描述。")),
+            );
+            if response.clicked() {
+                if let Some(runtime) = self.plugin_runtime.as_mut() {
+                    if let Some(instance) = runtime.plugin_mut(plugin_id) {
+                        match instance.execute_command(&command.id) {
+                            Ok(CommandOutcome { status, logs }) => {
+                                let log_text = if logs.is_empty() {
+                                    self.localized("No output produced.", "未產生任何輸出。")
+                                } else {
+                                    logs.join("\n")
+                                };
+                                let message = self.localized_owned(
+                                    format!(
+                                        "Command '{}' completed with status {status}: {log_text}",
+                                        command.id
+                                    ),
+                                    format!(
+                                        "命令 '{}' 以狀態 {status} 結束：{log_text}",
+                                        command.id
+                                    ),
+                                );
+                                log_info(&message);
+                                self.plugin_status_message = Some(message);
+                            }
+                            Err(err) => {
+                                let message = self.localized_owned(
+                                    format!("Failed to run command '{}': {err}", command.id),
+                                    format!("執行命令 '{}' 失敗：{err}", command.id),
+                                );
+                                log_warn(&message);
+                                self.plugin_status_message = Some(message);
+                            }
+                        }
+                    }
+                }
+            }
+            ui.add_space(4.0);
         }
     }
 }
@@ -4579,7 +5253,8 @@ mod tests {
     use super::*;
     use egui::text::CCursor;
     use egui::text_edit::CCursorRange;
-    use tempfile::tempdir_in;
+    use serde_json::json;
+    use tempfile::{tempdir, tempdir_in};
 
     #[test]
     fn switching_to_traditional_chinese_locale_does_not_panic() {
@@ -4743,6 +5418,95 @@ mod tests {
         assert!(
             collected.iter().any(|label| label == "sample_token"),
             "document index should expose the inserted token for completions, got {collected:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_system_discovers_plugins_and_toggles_state() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let temp_workspace = tempdir_in(manifest_dir).expect("temp workspace");
+        let workspace_root = temp_workspace.path();
+
+        let wasm_plugin_dir = workspace_root.join("plugins/wasm/sample");
+        fs::create_dir_all(&wasm_plugin_dir).expect("create wasm plugin dir");
+        let manifest = json!({
+            "id": "dev.rustnotepad.hello",
+            "name": "Hello Plugin",
+            "version": "0.1.0",
+            "entry": "hello.wasm",
+            "capabilities": ["buffer-read", "register-command"]
+        });
+        fs::write(
+            wasm_plugin_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        fs::write(wasm_plugin_dir.join("hello.wasm"), b"\0asm").expect("write wasm stub");
+
+        let win_dir = workspace_root.join("plugins/win32");
+        fs::create_dir_all(&win_dir).expect("create win dir");
+        let dll_path = win_dir.join("SamplePlugin.dll");
+        fs::write(&dll_path, b"dll").expect("write dll stub");
+
+        let mut system = PluginSystem::new(workspace_root);
+        let records = system.records();
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.kind, PluginKind::Wasm)),
+            "expected a WASM plugin record"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.kind, PluginKind::Windows) && record.can_toggle),
+            "expected a Windows plugin record"
+        );
+
+        let wasm_record = records
+            .iter()
+            .find(|record| matches!(record.identifier, PluginIdentifier::Wasm(_)))
+            .expect("wasm record present")
+            .clone();
+        system.set_plugin_enabled(&wasm_record.identifier, false);
+        let updated = system.records();
+        let wasm_record_updated = updated
+            .iter()
+            .find(|record| matches!(record.identifier, PluginIdentifier::Wasm(_)))
+            .expect("wasm record present after toggle");
+        assert!(
+            !wasm_record_updated.enabled,
+            "expected WASM plugin to be disabled after toggle"
+        );
+
+        let win_record = updated
+            .iter()
+            .find(|record| matches!(record.identifier, PluginIdentifier::Windows(_)))
+            .expect("windows record present")
+            .clone();
+        system.set_plugin_enabled(&win_record.identifier, false);
+        let win_updated_records = system.records();
+        let win_record_updated = win_updated_records
+            .iter()
+            .find(|record| matches!(record.identifier, PluginIdentifier::Windows(_)))
+            .expect("windows record after toggle");
+        assert!(
+            !win_record_updated.enabled,
+            "expected Windows plugin to be disabled after toggle"
+        );
+    }
+
+    #[test]
+    fn plugin_system_respects_global_disable() {
+        let temp_workspace = tempdir().expect("temp workspace");
+        let mut system = PluginSystem::new(temp_workspace.path());
+        assert!(system.is_enabled());
+        system.set_enabled(false);
+        assert!(!system.is_enabled());
+        let records_after_disable = system.records();
+        assert!(
+            records_after_disable.is_empty(),
+            "disabled plugin system should not expose plugin records"
         );
     }
 
@@ -4937,6 +5701,7 @@ enum SettingsPage {
     StyleConfigurator,
     ShortcutMapper,
     ContextMenu,
+    Plugins,
 }
 
 #[derive(Debug, Clone)]

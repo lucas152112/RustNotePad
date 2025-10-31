@@ -62,3 +62,13 @@ To produce a release binary named `rustnotepad` under `bin/`, execute:
 
 The script ensures `cargo` is available, builds `rustnotepad_gui` in release mode, and copies the resulting executable to `bin/rustnotepad`.  
 腳本會檢查 `cargo` 是否可用、以 release 模式建置 `rustnotepad_gui`，並將可執行檔複製到 `bin/rustnotepad`。
+
+To build multiple platform targets in one pass (requires corresponding toolchains), run:  
+若要一次建置多個平台目標（需先安裝相應工具鏈），請執行：
+
+```bash
+./scripts/build-all-targets.sh
+```
+
+Set `RNP_TARGETS` (space-separated) to override the default triples.  
+可透過設定以空白分隔的 `RNP_TARGETS` 覆寫預設的三元組清單。

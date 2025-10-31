@@ -1,0 +1,15 @@
+[package]
+name = "rustnotepad_plugin_host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustnotepad_plugin_wasm = { path = "../plugin_wasm" }
+thiserror = { workspace = true }
+wasmtime = { version = "14.0", features = ["cranelift", "parallel-compilation"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"
+wat = "1.0"
+tempfile = "3.10"
