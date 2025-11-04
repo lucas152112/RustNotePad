@@ -13,16 +13,16 @@
 ## Status Checklist / 進度檢查清單
 - [x] `design.md` drafted and reviewed  
   已完成 `design.md` 撰寫並初審
-- [ ] Windows ABI bridge implemented  
-  Windows ABI 橋接尚未實作
-- [ ] WASM host implemented  
-  WASM 宿主尚未實作
+- [x] Windows ABI bridge implemented  
+  已完成 Windows ABI 橋接
+- [x] WASM host implemented  
+  已完成 WASM 宿主實作
 - [ ] Plugin admin UI implemented  
   外掛管理 UI 尚未實作
 - [ ] Unit/integration/E2E tests in place  
   單元/整合/端到端測試尚未到位
-- [ ] `compatibility.md` updated  
-  `compatibility.md` 尚待更新
+- [x] `compatibility.md` updated  
+  `compatibility.md` 已更新
 - [ ] Documentation for plugin authors  
   外掛開發者文件尚未完成
 
@@ -45,8 +45,16 @@
   設定視窗現可列出已偵測的外掛並提供啟用/停用切換，並沿用 `-noPlugin` 的停用狀態。
 - WASM runtime crate (`rustnotepad_plugin_host`) instantiates enabled plugins, exposes command execution, and streams plugin logs back into the GUI.  
   WASM 執行期 crate（`rustnotepad_plugin_host`）會實例化啟用的外掛、提供命令執行，並將外掛輸出回傳至 GUI。
-- Runtime execution, sandboxing, and management UI remain pending.  
-  外掛執行、沙箱與管理介面仍待實作。
+- Trust policy enforces Ed25519 signatures (`signature.json`), ships with default signer, and disables unsigned plugins unless users opt in.  
+  信任策略要求 `signature.json` 內的 Ed25519 簽章，提供預設簽署者，未簽章外掛預設停用並需使用者另行允許。
+- Windows bridge loads DLL plugins, surfaces command metadata in the GUI, and flags load failures (non-Unicode, missing exports) for review.  
+  Windows 橋接可載入 DLL 外掛，在 GUI 呈現命令資訊，並針對非 Unicode 或缺匯出等錯誤顯示警示。
+- Windows message scaffolding (`WindowsMessage`, `dispatch_message`) is in place to wire future command execution.  
+  已建立 `WindowsMessage` / `dispatch_message` 訊息骨架，為後續命令執行鋪路。
+- Added `rustnotepad_plugin_admin` crate to script plugin install/update/remove operations (UI wiring pending).  
+  新增 `rustnotepad_plugin_admin` crate 提供外掛安裝/更新/移除腳本（GUI 串接尚未完成）。
+- Windows message translation/Scintilla shims and Plugin Admin UI remain pending.  
+  Windows 訊息轉譯 / Scintilla 介面與外掛管理 UI 串接仍待完成。
 
 ## Open Questions / 未決議題
 - TBD  

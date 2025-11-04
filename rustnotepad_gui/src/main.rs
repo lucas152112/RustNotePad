@@ -9,6 +9,9 @@ use egui::{
 };
 use image::load_from_memory;
 use once_cell::sync::Lazy;
+use plugin_admin::{
+    InstallOptions as PluginInstallOptions, InstallOutcome as PluginInstallOutcome,
+};
 use rustnotepad_autocomplete::{
     CompletionEngine, CompletionItem, CompletionRequest, DocumentIndex, DocumentWordsProvider,
     LanguageDictionaryProvider, LspProvider, Snippet, SnippetProvider,
@@ -18,15 +21,21 @@ use rustnotepad_function_list::{FunctionKind, ParserRegistry, RegexParser, Regex
 use rustnotepad_highlight::LanguageRegistry;
 use rustnotepad_lsp_client::{DiagnosticSeverity, LspClient};
 use rustnotepad_macros::{MacroError, MacroExecutor, MacroPlayer, MacroRecorder, MacroStore};
+use rustnotepad_plugin_admin as plugin_admin;
 use rustnotepad_plugin_host::{CommandOutcome, WasmPluginRuntime};
 use rustnotepad_plugin_wasm::{
     discover as discover_wasm_plugins, Capability, CapabilityPolicy as WasmCapabilityPolicy,
-    Inventory as WasmInventory, WasmPluginPackage,
+    Inventory as WasmInventory, PluginTrust, TrustPolicy as WasmTrustPolicy, WasmPluginPackage,
     DEFAULT_RELATIVE_ROOT as WASM_PLUGIN_RELATIVE_ROOT,
 };
 use rustnotepad_plugin_winabi::{
     discover as discover_win_plugins, PluginDescriptor as WinPluginDescriptor,
     DEFAULT_RELATIVE_ROOT as WIN_PLUGIN_RELATIVE_ROOT,
+};
+#[cfg(target_os = "windows")]
+use rustnotepad_plugin_winabi::{
+    winconst, LoadedPlugin as WinLoadedPlugin, NppData as WinNppData,
+    PluginCommand as WinPluginCommand, Shortcut as WinShortcut, WindowsMessage as WinMessage,
 };
 use rustnotepad_project::{
     AutosaveManifest, ProjectNode, ProjectNodeDraft, ProjectNodeId, ProjectNodeKind, ProjectTree,
@@ -144,10 +153,33 @@ struct PluginRecord {
     kind: PluginKind,
     location: PathBuf,
     capabilities: Vec<Capability>,
+    trust: Option<PluginTrust>,
     enabled: bool,
     can_toggle: bool,
     issue: Option<(String, String)>,
     size_on_disk: Option<u64>,
+    win_commands: Vec<WindowsCommandSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct WindowsCommandSummary {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    index: usize,
+    name: String,
+    shortcut: Option<String>,
+    initially_checked: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsCommandSummary {
+    fn from_plugin(index: usize, command: &WinPluginCommand) -> Self {
+        Self {
+            index,
+            name: command.name().to_string(),
+            shortcut: command.shortcut().map(format_win_shortcut),
+            initially_checked: command.initially_checked(),
+        }
+    }
 }
 
 impl PluginRecord {
@@ -160,27 +192,40 @@ impl PluginRecord {
 }
 
 struct PluginSystem {
+    #[allow(dead_code)]
+    workspace_root: PathBuf,
     wasm_root: PathBuf,
     win_root: PathBuf,
     wasm_inventory: WasmInventory,
     win_plugins: Vec<WinPluginDescriptor>,
     enabled: bool,
     wasm_policy: WasmCapabilityPolicy,
+    wasm_trust: WasmTrustPolicy,
     wasm_enabled: HashMap<String, bool>,
     win_enabled: HashMap<String, bool>,
+    #[cfg(target_os = "windows")]
+    win_loaded: HashMap<String, WindowsPluginState>,
+    #[cfg(target_os = "windows")]
+    win_load_errors: HashMap<String, String>,
 }
 
 impl PluginSystem {
     fn new(workspace_root: &Path) -> Self {
         let mut system = Self {
+            workspace_root: workspace_root.to_path_buf(),
             wasm_root: workspace_root.join(WASM_PLUGIN_RELATIVE_ROOT),
             win_root: workspace_root.join(WIN_PLUGIN_RELATIVE_ROOT),
             wasm_inventory: WasmInventory::default(),
             win_plugins: Vec::new(),
             enabled: true,
             wasm_policy: WasmCapabilityPolicy::locked_down(),
+            wasm_trust: WasmTrustPolicy::release_defaults(),
             wasm_enabled: HashMap::new(),
             win_enabled: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            win_loaded: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            win_load_errors: HashMap::new(),
         };
         system.refresh();
         system
@@ -217,10 +262,12 @@ impl PluginSystem {
                 kind: PluginKind::Wasm,
                 location: plugin.root_dir.clone(),
                 capabilities: plugin.manifest.capabilities.clone(),
+                trust: Some(plugin.trust.clone()),
                 enabled,
                 can_toggle: true,
                 issue: None,
                 size_on_disk: None,
+                win_commands: Vec::new(),
             });
         }
         for failure in &self.wasm_inventory.failures {
@@ -238,10 +285,12 @@ impl PluginSystem {
                 kind: PluginKind::Wasm,
                 location: failure.path.clone(),
                 capabilities: Vec::new(),
+                trust: None,
                 enabled: false,
                 can_toggle: false,
                 issue: Some((failure.message.clone(), failure.message.clone())),
                 size_on_disk: None,
+                win_commands: Vec::new(),
             });
         }
         for descriptor in &self.win_plugins {
@@ -249,11 +298,37 @@ impl PluginSystem {
                 WinPluginDescriptor::Binary { path, file_size } => {
                     let key = Self::normalize_path(path);
                     let enabled = self.is_windows_enabled(&key);
-                    let name = path
+                    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                    let mut name = path
                         .file_stem()
                         .and_then(|value| value.to_str())
                         .unwrap_or("Windows Plugin")
                         .to_string();
+                    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                    let mut can_toggle = true;
+                    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                    let mut issue = None;
+                    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+                    let mut win_commands = Vec::new();
+                    #[cfg(target_os = "windows")]
+                    {
+                        if let Some(error) = self.win_load_errors.get(&key) {
+                            issue = Some((error.clone(), error.clone()));
+                            can_toggle = false;
+                        }
+                        if let Some(state) = self.win_loaded.get(&key) {
+                            name = state.plugin.name().to_string();
+                            win_commands = state
+                                .plugin
+                                .commands()
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, command)| {
+                                    WindowsCommandSummary::from_plugin(idx, command)
+                                })
+                                .collect();
+                        }
+                    }
                     records.push(PluginRecord {
                         identifier: PluginIdentifier::Windows(key),
                         name,
@@ -262,10 +337,12 @@ impl PluginSystem {
                         kind: PluginKind::Windows,
                         location: path.clone(),
                         capabilities: Vec::new(),
+                        trust: None,
                         enabled,
-                        can_toggle: true,
-                        issue: None,
+                        can_toggle,
+                        issue,
                         size_on_disk: Some(*file_size),
+                        win_commands,
                     });
                 }
                 WinPluginDescriptor::MetadataOnly { path } => {
@@ -282,6 +359,7 @@ impl PluginSystem {
                         kind: PluginKind::Windows,
                         location: path.clone(),
                         capabilities: Vec::new(),
+                        trust: None,
                         enabled: false,
                         can_toggle: false,
                         issue: Some((
@@ -289,6 +367,7 @@ impl PluginSystem {
                             "找不到資料夾內的 DLL 檔案".to_string(),
                         )),
                         size_on_disk: None,
+                        win_commands: Vec::new(),
                     });
                 }
             }
@@ -313,6 +392,21 @@ impl PluginSystem {
                         id,
                         if enabled { "enabled" } else { "disabled" }
                     ));
+                    if enabled {
+                        if let Some(pkg) = self
+                            .wasm_inventory
+                            .plugins
+                            .iter()
+                            .find(|pkg| pkg.manifest.id == *id)
+                        {
+                            if matches!(pkg.trust, PluginTrust::Unsigned) {
+                                log_warn(format!(
+                                    "Unsigned WASM plugin {} enabled by user action",
+                                    id
+                                ));
+                            }
+                        }
+                    }
                     return true;
                 }
             }
@@ -379,7 +473,7 @@ impl PluginSystem {
             return;
         }
 
-        match discover_wasm_plugins(&self.wasm_root, &self.wasm_policy) {
+        match discover_wasm_plugins(&self.wasm_root, &self.wasm_policy, &self.wasm_trust) {
             Ok(inventory) => {
                 self.log_wasm_outcome(&inventory);
                 self.wasm_inventory = inventory;
@@ -390,9 +484,10 @@ impl PluginSystem {
                         .any(|pkg| pkg.manifest.id == *id)
                 });
                 for plugin in &self.wasm_inventory.plugins {
+                    let default_enabled = matches!(plugin.trust, PluginTrust::Trusted { .. });
                     self.wasm_enabled
                         .entry(plugin.manifest.id.clone())
-                        .or_insert(true);
+                        .or_insert(default_enabled);
                 }
             }
             Err(err) => {
@@ -402,6 +497,12 @@ impl PluginSystem {
                 ));
                 self.wasm_inventory = WasmInventory::default();
             }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            self.win_loaded.clear();
+            self.win_load_errors.clear();
         }
 
         match discover_win_plugins(&self.win_root) {
@@ -414,6 +515,37 @@ impl PluginSystem {
                     ));
                 }
                 self.win_plugins = descriptors;
+                #[cfg(target_os = "windows")]
+                {
+                    for descriptor in &self.win_plugins {
+                        if let WinPluginDescriptor::Binary { path, .. } = descriptor {
+                            let key = Self::normalize_path(path);
+                            match WinLoadedPlugin::load(path) {
+                                Ok(mut plugin) => {
+                                    unsafe {
+                                        plugin.set_info(WinNppData::default());
+                                    }
+                                    let command_count = plugin.commands().len();
+                                    log_info(format!(
+                                        "Windows plugin ready: {} ({} command(s))",
+                                        plugin.name(),
+                                        command_count
+                                    ));
+                                    self.win_loaded
+                                        .insert(key.clone(), WindowsPluginState::new(plugin));
+                                }
+                                Err(err) => {
+                                    log_warn(format!(
+                                        "Failed to load Windows plugin {}: {err}",
+                                        path.display()
+                                    ));
+                                    self.win_load_errors.insert(key.clone(), err.to_string());
+                                    self.win_enabled.insert(key.clone(), false);
+                                }
+                            }
+                        }
+                    }
+                }
                 self.win_enabled.retain(|key, _| {
                     self.win_plugins.iter().any(|descriptor| match descriptor {
                         WinPluginDescriptor::Binary { path, .. } => {
@@ -432,6 +564,11 @@ impl PluginSystem {
             Err(err) => {
                 log_warn(err.to_string());
                 self.win_plugins.clear();
+                #[cfg(target_os = "windows")]
+                {
+                    self.win_loaded.clear();
+                    self.win_load_errors.clear();
+                }
             }
         }
     }
@@ -456,6 +593,16 @@ impl PluginSystem {
                     "WASM plugin ready: {} v{} ({})",
                     plugin.manifest.name, plugin.manifest.version, plugin.manifest.id
                 ));
+                match &plugin.trust {
+                    PluginTrust::Trusted { signer } => log_info(format!(
+                        "Signature verified for {} by {signer}",
+                        plugin.manifest.id
+                    )),
+                    PluginTrust::Unsigned => log_warn(format!(
+                        "Plugin {} is unsigned; loaded under relaxed policy",
+                        plugin.manifest.id
+                    )),
+                }
             }
         }
 
@@ -484,6 +631,77 @@ impl PluginSystem {
     }
 
     #[allow(dead_code)]
+    fn install_wasm_from_path(
+        &mut self,
+        source: &Path,
+        overwrite: bool,
+    ) -> Result<PluginInstallOutcome, String> {
+        let options = PluginInstallOptions { overwrite };
+        let outcome = plugin_admin::install_wasm_plugin(&self.workspace_root, source, options)
+            .map_err(|err| err.to_string())?;
+        self.refresh();
+        if let PluginInstallOutcome::Wasm { manifest, .. } = &outcome {
+            self.wasm_enabled.insert(manifest.id.clone(), true);
+        }
+        Ok(outcome)
+    }
+
+    #[allow(dead_code)]
+    fn install_windows_from_path(
+        &mut self,
+        source: &Path,
+        overwrite: bool,
+    ) -> Result<PluginInstallOutcome, String> {
+        let options = PluginInstallOptions { overwrite };
+        let outcome = plugin_admin::install_windows_plugin(&self.workspace_root, source, options)
+            .map_err(|err| err.to_string())?;
+        self.refresh();
+        Ok(outcome)
+    }
+
+    #[allow(dead_code)]
+    fn remove_wasm_plugin_by_id(&mut self, plugin_id: &str) -> Result<(), String> {
+        plugin_admin::remove_wasm_plugin(&self.workspace_root, plugin_id)
+            .map_err(|err| err.to_string())?;
+        self.refresh();
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn remove_windows_plugin_by_name(&mut self, dll_name: &str) -> Result<(), String> {
+        plugin_admin::remove_windows_plugin(&self.workspace_root, dll_name)
+            .map_err(|err| err.to_string())?;
+        self.refresh();
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn execute_windows_command(
+        &mut self,
+        plugin_key: &str,
+        command_index: usize,
+    ) -> Result<WindowsCommandRun, String> {
+        let state = self
+            .win_loaded
+            .get(plugin_key)
+            .ok_or_else(|| format!("plugin {plugin_key} is not loaded"))?;
+        let command = state
+            .plugin
+            .commands()
+            .get(command_index)
+            .ok_or_else(|| format!("command index {command_index} not found"))?;
+        unsafe {
+            command.invoke();
+            let message = WinMessage::new(winconst::WM_COMMAND, command.command_id() as usize, 0);
+            let _ = state.plugin.dispatch_message(message);
+        }
+        Ok(WindowsCommandRun {
+            name: command.name().to_string(),
+            command_id: command.command_id(),
+        })
+    }
+
+    #[allow(dead_code)]
     fn wasm_plugins(&self) -> &[rustnotepad_plugin_wasm::WasmPluginPackage] {
         &self.wasm_inventory.plugins
     }
@@ -497,6 +715,45 @@ impl PluginSystem {
     fn win_plugins(&self) -> &[WinPluginDescriptor] {
         &self.win_plugins
     }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsPluginState {
+    plugin: WinLoadedPlugin,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsPluginState {
+    fn new(plugin: WinLoadedPlugin) -> Self {
+        Self { plugin }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn format_win_shortcut(shortcut: &WinShortcut) -> String {
+    let mut parts = Vec::new();
+    if shortcut.ctrl {
+        parts.push("Ctrl".to_string());
+    }
+    if shortcut.alt {
+        parts.push("Alt".to_string());
+    }
+    if shortcut.shift {
+        parts.push("Shift".to_string());
+    }
+    let key_label = match shortcut.key {
+        b'0'..=b'9' | b'A'..=b'Z' => (shortcut.key as char).to_string(),
+        0x70..=0x7B => format!("F{}", shortcut.key - 0x6F),
+        other => format!("VK{:02X}", other),
+    };
+    parts.push(key_label);
+    parts.join("+")
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsCommandRun {
+    name: String,
+    command_id: i32,
 }
 
 struct InstanceGuard {
@@ -1619,6 +1876,14 @@ impl RustNotePadApp {
         }
         if let Some(runtime) = &mut self.plugin_runtime {
             let packages = self.plugin_system.enabled_wasm_packages();
+            for package in &packages {
+                if matches!(package.trust, PluginTrust::Unsigned) {
+                    log_warn(format!(
+                        "Loading unsigned WASM plugin {}; signature not verified",
+                        package.manifest.id
+                    ));
+                }
+            }
             if let Err(err) = runtime.load_packages(&packages) {
                 let message = self.localized_owned(
                     format!("Failed to load WASM plugins: {err}"),
@@ -4921,10 +5186,118 @@ impl RustNotePadApp {
                         format!("能力：{}", capabilities.join("、")),
                     ));
                 }
+                if let Some(trust) = &record.trust {
+                    match trust {
+                        PluginTrust::Trusted { signer } => {
+                            group.label(self.localized_owned(
+                                format!("Signature: trusted ({signer})"),
+                                format!("簽章：已驗證（{signer}）"),
+                            ));
+                        }
+                        PluginTrust::Unsigned => {
+                            group.colored_label(
+                                Color32::from_rgb(249, 115, 22),
+                                self.localized(
+                                    "Plugin is unsigned; enable with caution.",
+                                    "此外掛缺少簽章，啟用時請謹慎。",
+                                ),
+                            );
+                        }
+                    }
+                }
                 if let Some((en, zh)) = &record.issue {
                     group.colored_label(
                         Color32::YELLOW,
                         self.localized_owned(en.clone(), zh.clone()),
+                    );
+                }
+
+                if record.kind == PluginKind::Windows && !record.win_commands.is_empty() {
+                    group.separator();
+                    let heading_en = if cfg!(target_os = "windows") {
+                        "Commands"
+                    } else {
+                        "Commands (preview)"
+                    };
+                    let heading_zh = if cfg!(target_os = "windows") {
+                        "命令清單"
+                    } else {
+                        "命令清單（預覽）"
+                    };
+                    group.label(self.localized(heading_en, heading_zh));
+
+                    #[cfg(target_os = "windows")]
+                    let plugin_key = match &record.identifier {
+                        PluginIdentifier::Windows(key) => Some(key.clone()),
+                        _ => None,
+                    };
+
+                    for cmd in &record.win_commands {
+                        group.horizontal(|row| {
+                            #[cfg(target_os = "windows")]
+                            if let (Some(key), PluginIdentifier::Windows(_)) =
+                                (plugin_key.as_ref(), &record.identifier)
+                            {
+                                let button_label = self.localized_owned(
+                                    format!("Run {}", cmd.name),
+                                    format!("執行 {}", cmd.name),
+                                );
+                                if row.button(button_label).clicked() {
+                                    match self.plugin_system.execute_windows_command(key, cmd.index)
+                                    {
+                                        Ok(outcome) => {
+                                            let message = self.localized_owned(
+                                                format!(
+                                                    "Windows command '{}' executed (id {})",
+                                                    outcome.name, outcome.command_id
+                                                ),
+                                                format!(
+                                                    "Windows 命令 '{}' 已執行（ID {}）",
+                                                    outcome.name, outcome.command_id
+                                                ),
+                                            );
+                                            log_info(&message);
+                                            self.plugin_status_message = Some(message);
+                                        }
+                                        Err(err) => {
+                                            let message = self.localized_owned(
+                                                format!(
+                                                    "Failed to run Windows command '{}': {err}",
+                                                    cmd.name
+                                                ),
+                                                format!(
+                                                    "執行 Windows 命令 '{}' 失敗：{err}",
+                                                    cmd.name
+                                                ),
+                                            );
+                                            log_warn(&message);
+                                            self.plugin_status_message = Some(message);
+                                        }
+                                    }
+                                }
+                            }
+
+                            let mut label_en = cmd.name.clone();
+                            let mut label_zh = cmd.name.clone();
+                            if let Some(shortcut) = &cmd.shortcut {
+                                let suffix = format!(" [{}]", shortcut);
+                                label_en.push_str(&suffix);
+                                label_zh.push_str(&suffix);
+                            }
+                            row.label(self.localized_owned(label_en, label_zh));
+                            if cmd.initially_checked {
+                                row.label(self.localized("Checked by default", "預設勾選"));
+                            }
+                        });
+                    }
+
+                    #[cfg(not(target_os = "windows"))]
+                    group.colored_label(
+                        Color32::from_rgb(148, 163, 184),
+                        self.localized(
+                            "Windows bridge preview – command execution not wired yet.",
+                            "Windows 橋接仍在預覽階段，尚未支援命令執行。",
+                        ),
                     );
                 }
 

@@ -15,6 +15,7 @@ members = [
     "crates/search",
     "crates/plugin_wasm",
     "crates/plugin_winabi",
+    "crates/plugin_admin",
     "crates/plugin_host",
     "apps/cli",
     "rust_sandbox_test",

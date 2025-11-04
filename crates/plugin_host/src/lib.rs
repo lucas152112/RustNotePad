@@ -269,6 +269,7 @@ pub enum PluginHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustnotepad_plugin_wasm::PluginTrust;
     use serde_json::json;
     use tempfile::tempdir;
     use wat::parse_str;
@@ -306,6 +307,7 @@ mod tests {
         let package = WasmPluginPackage::new(
             serde_json::from_slice(&std::fs::read(dir.join("plugin.json")).unwrap()).unwrap(),
             dir.to_path_buf(),
+            PluginTrust::Unsigned,
         )
         .expect("package");
         package

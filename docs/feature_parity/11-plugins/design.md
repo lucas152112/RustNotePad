@@ -26,14 +26,14 @@
   `rustnotepad_plugin_host` 啟動 Wasmtime、提供 `host.log` 主機函式，並允許 UI 觸發命令執行；輸出的紀錄會回饋到 GUI 狀態訊息。
 
 ## 3. Windows ABI Bridge / Windows ABI 橋接
-- `rustnotepad_plugin_winabi` currently focuses on filesystem discovery to remain cross-platform.  
-  `rustnotepad_plugin_winabi` 目前僅負責檔案系統掃描，以維持跨平台編譯。
-- Descriptor captures DLL location and size; metadata-only directories surface as warnings.  
-  描述器會記錄 DLL 的路徑與大小；僅含後設資料的資料夾會顯示警告。
-- Actual ABI thunk (Scintilla/N++ message translation) remains scoped to the Windows layer.  
-  實際的 ABI 轉譯（Scintilla/N++ 訊息轉換）留在 Windows 層處理。
-- Added Windows-only loader using `libloading` that ensures DLLs contain required exports; non-Windows builds surface a clear unsupported error.  
-  新增以 `libloading` 建立的 Windows 專屬載入器，檢查 DLL 是否具備必要匯出；非 Windows 平台則回報未支援錯誤。
+- `rustnotepad_plugin_winabi` now bundles discovery **and** a Windows-only loader that resolves `setInfo`, `getName`, `getFuncsArray`, `messageProc`, `beNotified`, `isUnicode`.  
+  `rustnotepad_plugin_winabi` 目前同時提供掃描與 Windows 專屬載入器，可解析 `setInfo`、`getName`、`getFuncsArray`、`messageProc`、`beNotified`、`isUnicode`。
+- Loader surfaces typed metadata (plugin name, commands, shortcuts, initial checked state) and exposes `WindowsMessage` dispatch helpers for future execution wiring.  
+  載入器會輸出類型化的資訊（外掛名稱、命令、快捷鍵、預設選取狀態），並提供 `WindowsMessage` 派送工具，利於後續接線。
+- Non-Windows builds still receive discovery results and clear "unsupported" errors without linking against Win32.  
+  非 Windows 平台仍僅產出掃描結果，並以明確訊息提示不支援。
+- Actual message translation & Scintilla bridging stay in the Windows host layer; current bridge is read-only for command metadata.  
+  訊息轉譯與 Scintilla 橋接仍交由 Windows 主程式實作，目前橋接僅提供命令中繼資料。
 
 ## 4. Plugin Management UI / 外掛管理介面
 - GUI keeps a `PluginSystem` instance that logs discovery and honours `-noPlugin`.  
@@ -42,17 +42,20 @@
   設定視窗會列出已偵測到的外掛、顯示能力並在允許時提供啟用/停用切換。
 - Actions (install/update/remove) will proxy to scriptable commands to keep Tauri bundle slim.  
   安裝/更新/移除將透過可腳本化指令實作，以維持 Tauri 套件精簡。
+- `rustnotepad_plugin_admin` provides reusable install/update/remove helpers for future GUI wiring.  
+  `rustnotepad_plugin_admin` 提供可重用的安裝/更新/移除函式，供後續 GUI 串接。
 
 ## 5. Security & Signing / 安全性與簽章
-- Manifest contains `minimum_host_version`; signature metadata will be stored alongside (e.g. `signature.json`).  
-  Manifest 內含 `minimum_host_version`，簽章資訊將另存（例如 `signature.json`）。
-- Trust policy layers:  
+- Manifest contains `minimum_host_version`; signature metadata lives in `signature.json` (Ed25519, Base64 payload with `signer`, `algorithm`, `signature`).  
+  Manifest 內含 `minimum_host_version`，簽章資訊紀錄於 `signature.json`（Ed25519，Base64 格式，欄位為 `signer`、`algorithm`、`signature`）。
+- Trust policy layers (all implemented):  
+  信任策略的三層防護（均已實作）：
   1. Manifest validation (well-formed metadata)  
      清單驗證（檢查後設資料）  
   2. Capability policy (host-level allow list)  
      能力政策（主程式許可清單）  
-  3. Signature verification (future)  
-     簽章驗證（後續加入）
+  3. Signature verification (Ed25519 trust store with default signer, unsigned plugins disabled by default)  
+     Ed25519 簽章驗證（內建信任簽署者；未簽章外掛預設停用）
 - WASM runtime confines wall-clock, memory, host calls; resource quotas configured per capability.  
   WASM 執行期會限制時間、記憶體與主機呼叫，資源配額依能力設定。
 

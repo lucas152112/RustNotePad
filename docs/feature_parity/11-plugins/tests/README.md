@@ -7,8 +7,14 @@
   WASM 宿主的能力限制檢查
 - Plugin metadata validation  
   外掛後設資料驗證
+- Signature trust policy enforcement (`cargo test -p rustnotepad_plugin_wasm`)  
+  簽章信任策略驗證（`cargo test -p rustnotepad_plugin_wasm`）
 - Plugin discovery state toggles (`cargo test -p rustnotepad_gui`)  
   外掛掃描與啟用狀態切換（`cargo test -p rustnotepad_gui`）
+- Windows ABI command metadata extraction (`cargo test -p rustnotepad_plugin_winabi`)  
+  Windows ABI 命令中繼資料解析（`cargo test -p rustnotepad_plugin_winabi`）
+- Plugin install/remove routines (`cargo test -p rustnotepad_plugin_admin`)  
+  外掛安裝/移除流程（`cargo test -p rustnotepad_plugin_admin`）
 
 ## Integration tests / 整合測試
 - Load/unload cycles for DLL & WASM plugins  
