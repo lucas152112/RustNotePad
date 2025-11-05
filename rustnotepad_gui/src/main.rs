@@ -182,6 +182,40 @@ impl WindowsCommandSummary {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy)]
+pub struct WindowsSessionHandles {
+    npp_handle: isize,
+    scintilla_main: isize,
+    scintilla_second: isize,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSessionHandles {
+    pub const fn new(npp_handle: isize, scintilla_main: isize, scintilla_second: isize) -> Self {
+        Self {
+            npp_handle,
+            scintilla_main,
+            scintilla_second,
+        }
+    }
+
+    fn to_npp_data(self) -> WinNppData {
+        WinNppData {
+            npp_handle: self.npp_handle,
+            scintilla_main_handle: self.scintilla_main,
+            scintilla_second_handle: self.scintilla_second,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Default for WindowsSessionHandles {
+    fn default() -> Self {
+        Self::new(0, 0, 0)
+    }
+}
+
 impl PluginRecord {
     fn capability_labels(&self) -> Vec<String> {
         self.capabilities
@@ -207,6 +241,8 @@ struct PluginSystem {
     win_loaded: HashMap<String, WindowsPluginState>,
     #[cfg(target_os = "windows")]
     win_load_errors: HashMap<String, String>,
+    #[cfg(target_os = "windows")]
+    windows_handles: WindowsSessionHandles,
 }
 
 impl PluginSystem {
@@ -226,6 +262,8 @@ impl PluginSystem {
             win_loaded: HashMap::new(),
             #[cfg(target_os = "windows")]
             win_load_errors: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            windows_handles: WindowsSessionHandles::default(),
         };
         system.refresh();
         system
@@ -436,6 +474,48 @@ impl PluginSystem {
         }
     }
 
+    #[cfg(test)]
+    fn set_wasm_trust_policy(&mut self, policy: WasmTrustPolicy) {
+        self.wasm_trust = policy;
+        self.refresh();
+    }
+
+    fn remove_plugin(&mut self, identifier: &PluginIdentifier) -> Result<(), String> {
+        match identifier {
+            PluginIdentifier::Wasm(id) => {
+                plugin_admin::remove_wasm_plugin(&self.workspace_root, id)
+                    .map_err(|err| err.to_string())?;
+                self.refresh();
+                self.wasm_enabled.remove(id);
+                Ok(())
+            }
+            PluginIdentifier::Windows(key) => {
+                let dll_name = self
+                    .win_plugins
+                    .iter()
+                    .find_map(|descriptor| match descriptor {
+                        WinPluginDescriptor::Binary { path, .. } => {
+                            if Self::normalize_path(path) == *key {
+                                path.file_name()
+                                    .and_then(|name| name.to_str())
+                                    .map(|value| value.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        WinPluginDescriptor::MetadataOnly { .. } => None,
+                    })
+                    .ok_or_else(|| format!("unable to locate Windows plugin matching {key}"))?;
+                plugin_admin::remove_windows_plugin(&self.workspace_root, &dll_name)
+                    .map_err(|err| err.to_string())?;
+                self.refresh();
+                self.win_enabled.remove(key);
+                Ok(())
+            }
+            PluginIdentifier::Failure(_) => Err("cannot remove failed plugin entries".to_string()),
+        }
+    }
+
     fn enabled_wasm_packages(&self) -> Vec<WasmPluginPackage> {
         if !self.enabled {
             return Vec::new();
@@ -517,22 +597,22 @@ impl PluginSystem {
                 self.win_plugins = descriptors;
                 #[cfg(target_os = "windows")]
                 {
+                    let handles = self.windows_handles.to_npp_data();
                     for descriptor in &self.win_plugins {
                         if let WinPluginDescriptor::Binary { path, .. } = descriptor {
                             let key = Self::normalize_path(path);
                             match WinLoadedPlugin::load(path) {
-                                Ok(mut plugin) => {
-                                    unsafe {
-                                        plugin.set_info(WinNppData::default());
-                                    }
+                                Ok(plugin) => {
                                     let command_count = plugin.commands().len();
                                     log_info(format!(
                                         "Windows plugin ready: {} ({} command(s))",
                                         plugin.name(),
                                         command_count
                                     ));
-                                    self.win_loaded
-                                        .insert(key.clone(), WindowsPluginState::new(plugin));
+                                    self.win_loaded.insert(
+                                        key.clone(),
+                                        WindowsPluginState::new(plugin, handles),
+                                    );
                                 }
                                 Err(err) => {
                                     log_warn(format!(
@@ -630,6 +710,15 @@ impl PluginSystem {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn set_windows_handles(&mut self, handles: WindowsSessionHandles) {
+        self.windows_handles = handles;
+        let data = self.windows_handles.to_npp_data();
+        for state in self.win_loaded.values_mut() {
+            state.set_npp_data(data);
+        }
+    }
+
     #[allow(dead_code)]
     fn install_wasm_from_path(
         &mut self,
@@ -656,6 +745,10 @@ impl PluginSystem {
         let outcome = plugin_admin::install_windows_plugin(&self.workspace_root, source, options)
             .map_err(|err| err.to_string())?;
         self.refresh();
+        if let PluginInstallOutcome::Windows { dest_path, .. } = &outcome {
+            let key = Self::normalize_path(dest_path);
+            self.win_enabled.insert(key, true);
+        }
         Ok(outcome)
     }
 
@@ -724,8 +817,17 @@ struct WindowsPluginState {
 
 #[cfg(target_os = "windows")]
 impl WindowsPluginState {
-    fn new(plugin: WinLoadedPlugin) -> Self {
+    fn new(mut plugin: WinLoadedPlugin, data: WinNppData) -> Self {
+        unsafe {
+            plugin.set_info(data);
+        }
         Self { plugin }
+    }
+
+    fn set_npp_data(&mut self, data: WinNppData) {
+        unsafe {
+            self.plugin.set_info(data);
+        }
     }
 }
 
@@ -1517,6 +1619,13 @@ struct RustNotePadApp {
     plugin_system: PluginSystem,
     plugin_runtime: Option<WasmPluginRuntime>,
     plugin_status_message: Option<String>,
+    plugin_wasm_install_path: String,
+    plugin_wasm_install_overwrite: bool,
+    plugin_win_install_path: String,
+    plugin_win_install_overwrite: bool,
+    plugin_pending_removal: Option<PluginIdentifier>,
+    #[cfg(target_os = "windows")]
+    windows_handles: WindowsSessionHandles,
 }
 
 impl Default for RustNotePadApp {
@@ -1723,6 +1832,10 @@ impl RustNotePadApp {
         let default_macro_name = "Macro 1".to_string();
         let mut plugin_system = PluginSystem::new(&workspace_root);
         plugin_system.restore_from_profile(&profile_store);
+        #[cfg(target_os = "windows")]
+        let windows_handles = WindowsSessionHandles::default();
+        #[cfg(target_os = "windows")]
+        plugin_system.set_windows_handles(windows_handles);
         let plugin_runtime = match WasmPluginRuntime::new() {
             Ok(runtime) => Some(runtime),
             Err(err) => {
@@ -1798,6 +1911,13 @@ impl RustNotePadApp {
             plugin_system,
             plugin_runtime,
             plugin_status_message: None,
+            plugin_wasm_install_path: String::new(),
+            plugin_wasm_install_overwrite: false,
+            plugin_win_install_path: String::new(),
+            plugin_win_install_overwrite: false,
+            plugin_pending_removal: None,
+            #[cfg(target_os = "windows")]
+            windows_handles,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -1909,6 +2029,124 @@ impl RustNotePadApp {
         }
     }
 
+    fn install_wasm_plugin_from_input(&mut self) {
+        let source = match self.resolve_user_path(&self.plugin_wasm_install_path) {
+            Some(path) => path,
+            None => {
+                self.plugin_status_message = Some(self.localized(
+                    "Provide a directory containing the WASM plugin manifest.",
+                    "請提供包含 WASM 外掛資訊文件的資料夾路徑。",
+                ));
+                return;
+            }
+        };
+        match self
+            .plugin_system
+            .install_wasm_from_path(&source, self.plugin_wasm_install_overwrite)
+        {
+            Ok(PluginInstallOutcome::Wasm { manifest, .. }) => {
+                let identifier = PluginIdentifier::Wasm(manifest.id.clone());
+                self.persist_plugin_state(&identifier, true);
+                self.reload_wasm_plugins();
+                self.plugin_status_message = Some(self.localized_owned(
+                    format!("Installed WASM plugin '{}'.", manifest.id),
+                    format!("已安裝 WASM 外掛「{}」。", manifest.id),
+                ));
+                self.plugin_wasm_install_path.clear();
+            }
+            Ok(other) => {
+                log_warn(format!(
+                    "Unexpected install outcome for WASM plugin: {:?}",
+                    other
+                ));
+            }
+            Err(err) => {
+                self.plugin_status_message = Some(self.localized_owned(
+                    format!("Failed to install WASM plugin: {err}"),
+                    format!("安裝 WASM 外掛失敗：{err}"),
+                ));
+            }
+        }
+    }
+
+    fn install_windows_plugin_from_input(&mut self) {
+        let source = match self.resolve_user_path(&self.plugin_win_install_path) {
+            Some(path) => path,
+            None => {
+                self.plugin_status_message = Some(self.localized(
+                    "Provide a DLL file or directory containing a DLL.",
+                    "請提供 DLL 檔案或包含 DLL 的資料夾路徑。",
+                ));
+                return;
+            }
+        };
+        match self
+            .plugin_system
+            .install_windows_from_path(&source, self.plugin_win_install_overwrite)
+        {
+            Ok(PluginInstallOutcome::Windows {
+                dll_name,
+                dest_path,
+            }) => {
+                let key = PluginSystem::normalize_path(&dest_path);
+                self.persist_plugin_state(&PluginIdentifier::Windows(key.clone()), true);
+                self.reload_wasm_plugins();
+                self.plugin_status_message = Some(self.localized_owned(
+                    format!("Installed Windows plugin '{}'.", dll_name),
+                    format!("已安裝 Windows 外掛「{}」。", dll_name),
+                ));
+                self.plugin_win_install_path.clear();
+            }
+            Ok(other) => {
+                log_warn(format!(
+                    "Unexpected install outcome for Windows plugin: {:?}",
+                    other
+                ));
+            }
+            Err(err) => {
+                self.plugin_status_message = Some(self.localized_owned(
+                    format!("Failed to install Windows plugin: {err}"),
+                    format!("安裝 Windows 外掛失敗：{err}"),
+                ));
+            }
+        }
+    }
+
+    fn attempt_remove_plugin(&mut self, identifier: &PluginIdentifier) {
+        match self.plugin_system.remove_plugin(identifier) {
+            Ok(()) => {
+                self.reload_wasm_plugins();
+                let message = match identifier {
+                    PluginIdentifier::Wasm(id) => self.localized_owned(
+                        format!("Removed WASM plugin '{}'.", id),
+                        format!("已移除 WASM 外掛「{}」。", id),
+                    ),
+                    PluginIdentifier::Windows(path) => {
+                        let display = Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(path.as_str());
+                        self.localized_owned(
+                            format!("Removed Windows plugin '{}'.", display),
+                            format!("已移除 Windows 外掛「{}」。", display),
+                        )
+                    }
+                    PluginIdentifier::Failure(_) => {
+                        self.localized("Removed plugin entry.", "已移除外掛項目。")
+                    }
+                };
+                self.plugin_status_message = Some(message);
+            }
+            Err(err) => {
+                self.plugin_status_message = Some(self.localized_owned(
+                    format!("Failed to remove plugin: {err}"),
+                    format!("移除外掛失敗：{err}"),
+                ));
+            }
+        }
+        self.plugin_pending_removal = None;
+    }
+
     fn persist_plugin_state(&mut self, identifier: &PluginIdentifier, enabled: bool) {
         let key = match identifier {
             PluginIdentifier::Wasm(id) => format!("plugin.wasm.{id}.enabled"),
@@ -1945,6 +2183,12 @@ impl RustNotePadApp {
                 ));
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn set_windows_session_handles(&mut self, handles: WindowsSessionHandles) {
+        self.windows_handles = handles;
+        self.plugin_system.set_windows_handles(handles);
     }
 
     fn activate_theme_by_name(&mut self, name: &str) -> bool {
@@ -2126,6 +2370,15 @@ impl RustNotePadApp {
         } else {
             self.workspace_root.join(path)
         }
+    }
+
+    fn resolve_user_path(&self, raw: &str) -> Option<PathBuf> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let candidate = PathBuf::from(trimmed);
+        Some(self.resolve_path(&candidate))
     }
 
     fn apply_language_override(&mut self, tab_id: &str, hint: &str) {
@@ -5134,6 +5387,7 @@ impl RustNotePadApp {
         }
 
         for record in records {
+            let record_identifier = record.identifier.clone();
             ui.group(|group| {
                 let mut enabled = record.enabled;
                 let kind_label = match record.kind {
@@ -5210,6 +5464,47 @@ impl RustNotePadApp {
                         Color32::YELLOW,
                         self.localized_owned(en.clone(), zh.clone()),
                     );
+                }
+
+                if record.issue.is_none() {
+                    match &record_identifier {
+                        PluginIdentifier::Wasm(_) | PluginIdentifier::Windows(_) => {
+                            group.add_space(4.0);
+                            if self
+                                .plugin_pending_removal
+                                .as_ref()
+                                .map(|pending| pending == &record_identifier)
+                                .unwrap_or(false)
+                            {
+                                group.horizontal(|ui| {
+                                    ui.label(
+                                        self.localized(
+                                            "Remove this plugin?",
+                                            "確定要移除此外掛嗎？",
+                                        ),
+                                    );
+                                    if ui
+                                        .button(self.localized("Confirm removal", "確認移除"))
+                                        .clicked()
+                                    {
+                                        self.attempt_remove_plugin(&record_identifier);
+                                    }
+                                    if ui.button(self.localized("Cancel", "取消")).clicked() {
+                                        self.plugin_pending_removal = None;
+                                        self.plugin_status_message = Some(
+                                            self.localized("Removal canceled.", "已取消移除操作。"),
+                                        );
+                                    }
+                                });
+                            } else if group
+                                .button(self.localized("Remove plugin", "移除外掛"))
+                                .clicked()
+                            {
+                                self.plugin_pending_removal = Some(record_identifier.clone());
+                            }
+                        }
+                        PluginIdentifier::Failure(_) => {}
+                    }
                 }
 
                 if record.kind == PluginKind::Windows && !record.win_commands.is_empty() {
@@ -5309,6 +5604,60 @@ impl RustNotePadApp {
             });
             ui.add_space(6.0);
         }
+
+        self.render_plugin_install_controls(ui);
+    }
+
+    fn render_plugin_install_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading(self.localized("Install or update plugins", "安裝或更新外掛"));
+        ui.add_space(6.0);
+
+        ui.group(|group| {
+            group.label(self.localized(
+                "Install or update a WASM plugin (directory with plugin.json).",
+                "安裝或更新 WASM 外掛（需提供包含 plugin.json 的資料夾）。",
+            ));
+            let wasm_hint =
+                self.localized("Relative or absolute directory path", "輸入相對或絕對路徑");
+            group.add(
+                egui::TextEdit::singleline(&mut self.plugin_wasm_install_path).hint_text(wasm_hint),
+            );
+            let overwrite_label = self.localized("Overwrite existing plugin", "覆寫既有外掛");
+            let install_label = self.localized("Install WASM plugin", "安裝 WASM 外掛");
+            group.horizontal(|row| {
+                row.checkbox(
+                    &mut self.plugin_wasm_install_overwrite,
+                    overwrite_label.clone(),
+                );
+                if row.button(install_label.clone()).clicked() {
+                    self.install_wasm_plugin_from_input();
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.group(|group| {
+            group.label(self.localized(
+                "Install or update a Windows DLL plugin.",
+                "安裝或更新 Windows DLL 外掛。",
+            ));
+            let win_hint = self.localized("DLL file or directory path", "DLL 檔案或資料夾路徑");
+            group.add(
+                egui::TextEdit::singleline(&mut self.plugin_win_install_path).hint_text(win_hint),
+            );
+            let overwrite_label = self.localized("Overwrite existing plugin", "覆寫既有外掛");
+            let install_label = self.localized("Install Windows plugin", "安裝 Windows 外掛");
+            group.horizontal(|row| {
+                row.checkbox(
+                    &mut self.plugin_win_install_overwrite,
+                    overwrite_label.clone(),
+                );
+                if row.button(install_label.clone()).clicked() {
+                    self.install_windows_plugin_from_input();
+                }
+            });
+        });
     }
 
     fn render_wasm_command_controls(&mut self, ui: &mut egui::Ui, plugin_id: &str) {
@@ -5778,7 +6127,9 @@ mod tests {
         assert!(
             app.macro_messages
                 .iter()
-                .any(|message| message.contains("Inserted")),
+                .any(|message| {
+                    message.contains("Inserted") || message.contains("已插入")
+                }),
             "macro log should record the insertion event"
         );
 
@@ -5822,6 +6173,7 @@ mod tests {
         fs::write(&dll_path, b"dll").expect("write dll stub");
 
         let mut system = PluginSystem::new(workspace_root);
+        system.set_wasm_trust_policy(WasmTrustPolicy::allow_unsigned([]));
         let records = system.records();
         assert!(
             records
@@ -5880,6 +6232,102 @@ mod tests {
         assert!(
             records_after_disable.is_empty(),
             "disabled plugin system should not expose plugin records"
+        );
+    }
+
+    #[test]
+    fn plugin_admin_install_and_remove_flows_update_inventory() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let temp_workspace = tempdir_in(manifest_dir).expect("temp workspace");
+        let workspace_root = temp_workspace.path();
+
+        let wasm_source = tempdir_in(manifest_dir).expect("wasm source");
+        let wasm_dir = wasm_source.path();
+        fs::create_dir_all(wasm_dir.join("bin")).expect("create wasm source bin");
+        fs::write(wasm_dir.join("bin/module.wasm"), b"\0asm").expect("write wasm stub");
+        let wasm_manifest = json!({
+            "id": "dev.rustnotepad.flow",
+            "name": "Flow Plugin",
+            "version": "0.2.0",
+            "entry": "bin/module.wasm",
+            "capabilities": ["buffer-read"]
+        });
+        fs::write(
+            wasm_dir.join("plugin.json"),
+            serde_json::to_vec_pretty(&wasm_manifest).expect("serialize wasm manifest"),
+        )
+        .expect("write wasm manifest");
+
+        let mut system = PluginSystem::new(workspace_root);
+        system.set_wasm_trust_policy(WasmTrustPolicy::allow_unsigned([]));
+        let wasm_manifest_id = match system
+            .install_wasm_from_path(wasm_dir, false)
+            .expect("install wasm plugin")
+        {
+            PluginInstallOutcome::Wasm { manifest, .. } => manifest.id,
+            other => panic!("unexpected install outcome: {:?}", other),
+        };
+
+        let wasm_workspace_dir = workspace_root
+            .join(WASM_PLUGIN_RELATIVE_ROOT)
+            .join(&wasm_manifest_id);
+        assert!(
+            wasm_workspace_dir.exists(),
+            "installed WASM plugin directory should exist"
+        );
+        let records = system.records();
+        assert!(
+            records.iter().any(|record| matches!(
+                &record.identifier,
+                PluginIdentifier::Wasm(id) if id == &wasm_manifest_id
+            )),
+            "installed WASM plugin should be discoverable"
+        );
+
+        system
+            .remove_plugin(&PluginIdentifier::Wasm(wasm_manifest_id.clone()))
+            .expect("remove wasm plugin");
+        let records_after_remove = system.records();
+        assert!(
+            records_after_remove.iter().all(|record| !matches!(
+                &record.identifier,
+                PluginIdentifier::Wasm(id) if id == &wasm_manifest_id
+            )),
+            "removed WASM plugin should no longer be listed"
+        );
+
+        let win_source = tempdir_in(manifest_dir).expect("windows source");
+        let dll_path = win_source.path().join("FlowPlugin.dll");
+        fs::write(&dll_path, b"dll").expect("write dll stub");
+        let windows_key = match system
+            .install_windows_from_path(win_source.path(), true)
+            .expect("install windows plugin")
+        {
+            PluginInstallOutcome::Windows { dest_path, .. } => {
+                PluginSystem::normalize_path(&dest_path)
+            }
+            other => panic!("unexpected install outcome: {:?}", other),
+        };
+
+        let win_records = system.records();
+        assert!(
+            win_records.iter().any(|record| matches!(
+                &record.identifier,
+                PluginIdentifier::Windows(key) if key == &windows_key
+            )),
+            "installed Windows plugin should be discoverable"
+        );
+
+        system
+            .remove_plugin(&PluginIdentifier::Windows(windows_key.clone()))
+            .expect("remove windows plugin");
+        let win_records_after_remove = system.records();
+        assert!(
+            win_records_after_remove.iter().all(|record| !matches!(
+                &record.identifier,
+                PluginIdentifier::Windows(key) if key == &windows_key
+            )),
+            "removed Windows plugin should not appear in listing"
         );
     }
 

@@ -4,6 +4,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rustnotepad_core::{Document, Encoding, LegacyEncoding, LineEnding};
+use rustnotepad_plugin_admin as plugin_admin;
+use rustnotepad_plugin_admin::{
+    InstallOptions as PluginInstallOptions, InstallOutcome as PluginInstallOutcome,
+};
+use rustnotepad_plugin_wasm::MANIFEST_FILE as WASM_MANIFEST_FILE;
+#[cfg(target_os = "windows")]
+use rustnotepad_plugin_winabi::LoadedPlugin;
 use rustnotepad_search::{
     FileSearchResult, ReplaceAllOutcome, SearchEngine, SearchMode, SearchOptions, SearchReport,
 };
@@ -17,6 +24,9 @@ use walkdir::WalkDir;
     version
 )]
 struct Cli {
+    /// 指定工作區根目錄；預設為目前目錄。 / Workspace root (defaults to current directory).
+    #[arg(long, global = true, value_name = "PATH")]
+    workspace: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -27,6 +37,9 @@ enum Commands {
     Convert(ConvertArgs),
     /// 搜尋與選用的取代指令。 / Search (and optional replace) across files.
     Search(SearchArgs),
+    /// 管理 RustNotePad 外掛（安裝/移除）。 / Manage RustNotePad plugins (install/remove).
+    #[command(subcommand)]
+    Plugin(PluginCommand),
 }
 
 #[derive(Args)]
@@ -150,6 +163,61 @@ struct SearchArgs {
     apply: bool,
 }
 
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// 安裝或更新外掛。 / Install or update a plugin.
+    Install(PluginInstallArgs),
+    /// 移除既有外掛。 / Remove an installed plugin.
+    Remove(PluginRemoveArgs),
+    /// 驗證 Windows DLL 外掛相容性（僅限 Windows）。 / Verify Windows DLL plugin compatibility (Windows only).
+    #[cfg(target_os = "windows")]
+    Verify(PluginVerifyArgs),
+}
+
+#[derive(Args)]
+struct PluginInstallArgs {
+    /// 插件來源路徑（WASM 資料夾或 DLL 檔案/資料夾）。 / Plugin source path (WASM directory or DLL file/folder).
+    #[arg(value_name = "PATH")]
+    source: PathBuf,
+
+    /// 外掛來源類型；預設自動判斷。 / Plugin source kind; defaults to auto-detect.
+    #[arg(long, value_enum, default_value_t = PluginInstallKind::Auto)]
+    kind: PluginInstallKind,
+
+    /// 覆寫既有外掛。 / Overwrite existing plugin.
+    #[arg(long)]
+    overwrite: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PluginInstallKind {
+    Auto,
+    Wasm,
+    Windows,
+}
+
+#[derive(Args)]
+struct PluginRemoveArgs {
+    /// 移除指定 ID 的 WASM 外掛。 / Remove a WASM plugin by id.
+    #[arg(long, value_name = "PLUGIN_ID", conflicts_with = "dll")]
+    wasm: Option<String>,
+    /// 移除指定 DLL 名稱的 Windows 外掛。 / Remove a Windows plugin by DLL name.
+    #[arg(long, value_name = "DLL_NAME", conflicts_with = "wasm")]
+    dll: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Args)]
+struct PluginVerifyArgs {
+    /// DLL 檔案或包含 DLL 的資料夾路徑。 / Path to the DLL or a directory containing it.
+    #[arg(value_name = "PATH")]
+    source: PathBuf,
+
+    /// 列出命令與快捷鍵。 / Print exported command table.
+    #[arg(long)]
+    show_commands: bool,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("Error: {err}");
@@ -158,10 +226,14 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
+    let Cli { workspace, command } = Cli::parse();
+    match command {
         Commands::Convert(args) => execute_convert(args),
         Commands::Search(args) => execute_search(args),
+        Commands::Plugin(subcommand) => {
+            let workspace_root = resolve_workspace(workspace)?;
+            execute_plugin_command(subcommand, &workspace_root)
+        }
     }
 }
 
@@ -197,6 +269,225 @@ fn execute_convert(args: ConvertArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn execute_plugin_command(command: PluginCommand, workspace_root: &Path) -> Result<()> {
+    match command {
+        PluginCommand::Install(args) => install_plugin(args, workspace_root),
+        PluginCommand::Remove(args) => remove_plugin(args, workspace_root),
+        #[cfg(target_os = "windows")]
+        PluginCommand::Verify(args) => verify_plugin(args),
+    }
+}
+
+fn install_plugin(args: PluginInstallArgs, workspace_root: &Path) -> Result<()> {
+    let source = resolve_input_path(&args.source)?;
+    if !source.exists() {
+        bail!("plugin source '{}' does not exist", source.display());
+    }
+    let resolved_kind = match args.kind {
+        PluginInstallKind::Auto => detect_plugin_kind(&source)?,
+        other => other,
+    };
+    let options = PluginInstallOptions {
+        overwrite: args.overwrite,
+    };
+    match resolved_kind {
+        PluginInstallKind::Wasm => {
+            match plugin_admin::install_wasm_plugin(workspace_root, &source, options)? {
+                PluginInstallOutcome::Wasm { manifest, dest_dir } => {
+                    println!(
+                        "Installed WASM plugin '{}' to {}",
+                        manifest.id,
+                        dest_dir.display()
+                    );
+                }
+                other => return Err(anyhow!("unexpected install outcome: {:?}", other)),
+            }
+        }
+        PluginInstallKind::Windows => {
+            match plugin_admin::install_windows_plugin(workspace_root, &source, options)? {
+                PluginInstallOutcome::Windows {
+                    dll_name,
+                    dest_path,
+                } => {
+                    println!(
+                        "Installed Windows plugin '{}' to {}",
+                        dll_name,
+                        dest_path.display()
+                    );
+                }
+                other => return Err(anyhow!("unexpected install outcome: {:?}", other)),
+            }
+        }
+        PluginInstallKind::Auto => unreachable!("auto kind should be resolved above"),
+    }
+    Ok(())
+}
+
+fn remove_plugin(args: PluginRemoveArgs, workspace_root: &Path) -> Result<()> {
+    match (args.wasm, args.dll) {
+        (Some(id), None) => {
+            plugin_admin::remove_wasm_plugin(workspace_root, &id)?;
+            println!("Removed WASM plugin '{id}'");
+            Ok(())
+        }
+        (None, Some(dll_name)) => {
+            plugin_admin::remove_windows_plugin(workspace_root, &dll_name)?;
+            println!("Removed Windows plugin '{dll_name}'");
+            Ok(())
+        }
+        _ => bail!("specify --wasm <PLUGIN_ID> or --dll <DLL_NAME>"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn verify_plugin(args: PluginVerifyArgs) -> Result<()> {
+    let source = resolve_input_path(&args.source)?;
+    let dll_path = resolve_windows_plugin_source(&source)
+        .with_context(|| format!("locate DLL within {}", source.display()))?;
+    let plugin = unsafe { LoadedPlugin::load(&dll_path) }
+        .with_context(|| format!("load plugin {}", dll_path.display()))?;
+    println!("Plugin name: {}", plugin.name());
+    println!(
+        "Source DLL: {}",
+        dll_path
+            .canonicalize()
+            .unwrap_or(dll_path.clone())
+            .display()
+    );
+    println!(
+        "Unicode support: {}",
+        if plugin.is_unicode() { "yes" } else { "no" }
+    );
+    if args.show_commands {
+        println!("Exported commands:");
+        for command in plugin.commands() {
+            let shortcut = command.shortcut().map_or_else(
+                || "none".to_string(),
+                |s| {
+                    format!(
+                        "{}{}{}{}",
+                        if s.ctrl { "Ctrl+" } else { "" },
+                        if s.alt { "Alt+" } else { "" },
+                        if s.shift { "Shift+" } else { "" },
+                        (s.key as char)
+                    )
+                },
+            );
+            println!(
+                "  - id: {:>3} | checked: {:<5} | shortcut: {:<8} | {}",
+                command.command_id(),
+                command.initially_checked(),
+                shortcut,
+                command.name()
+            );
+        }
+    } else {
+        println!("Exported commands: {}", plugin.commands().len());
+    }
+    Ok(())
+}
+
+fn detect_plugin_kind(source: &Path) -> Result<PluginInstallKind> {
+    let metadata =
+        fs::metadata(source).with_context(|| format!("read metadata from {}", source.display()))?;
+    if metadata.is_file() {
+        if is_dll(source) {
+            return Ok(PluginInstallKind::Windows);
+        }
+        bail!(
+            "file '{}' does not look like a Windows plugin; specify --kind",
+            source.display()
+        );
+    }
+    if metadata.is_dir() {
+        if source.join(WASM_MANIFEST_FILE).exists() {
+            return Ok(PluginInstallKind::Wasm);
+        }
+        for entry in
+            fs::read_dir(source).with_context(|| format!("scan directory {}", source.display()))?
+        {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_file() && is_dll(&entry_path) {
+                return Ok(PluginInstallKind::Windows);
+            }
+        }
+    }
+    bail!(
+        "unable to infer plugin kind from '{}'; specify --kind",
+        source.display()
+    );
+}
+
+fn is_dll(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("dll"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_plugin_source(source: &Path) -> Result<PathBuf> {
+    if source.is_file() {
+        if is_dll(source) {
+            return Ok(source.to_path_buf());
+        }
+        bail!(
+            "expected a DLL file, got '{}' (use --kind wasm for WASM plugins)",
+            source.display()
+        );
+    }
+    if source.is_dir() {
+        let mut dlls = Vec::new();
+        for entry in
+            fs::read_dir(source).with_context(|| format!("scan directory {}", source.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && is_dll(&path) {
+                dlls.push(path);
+            }
+        }
+        match dlls.len() {
+            0 => bail!("did not find a DLL under '{}'", source.display()),
+            1 => return Ok(dlls.remove(0)),
+            _ => bail!(
+                "found multiple DLLs under '{}'; specify the DLL file directly",
+                source.display()
+            ),
+        }
+    }
+    bail!(
+        "expected a DLL file or directory containing one at '{}'",
+        source.display()
+    );
+}
+
+fn resolve_workspace(workspace: Option<PathBuf>) -> Result<PathBuf> {
+    match workspace {
+        Some(path) => {
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Ok(std::env::current_dir()
+                    .context("determine current directory")?
+                    .join(path))
+            }
+        }
+        None => std::env::current_dir().context("determine current directory"),
+    }
+}
+
+fn resolve_input_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .context("determine current directory")?
+            .join(path))
+    }
 }
 
 fn convert_single(

@@ -12,6 +12,8 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 rustnotepad_core = { path = "../../crates/core" }
 rustnotepad_search = { path = "../../crates/search" }
+rustnotepad_plugin_admin = { path = "../../crates/plugin_admin" }
+rustnotepad_plugin_wasm = { path = "../../crates/plugin_wasm" }
 walkdir = "2.5"
 
 [dev-dependencies]

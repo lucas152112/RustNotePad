@@ -3146,6 +3146,8 @@ dependencies = [
  "encoding_rs",
  "predicates",
  "rustnotepad_core",
+ "rustnotepad_plugin_admin",
+ "rustnotepad_plugin_wasm",
  "rustnotepad_search",
  "tempfile",
  "walkdir",
@@ -3275,6 +3277,7 @@ dependencies = [
 name = "rustnotepad_plugin_winabi"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libloading",
  "tempfile",
  "thiserror",

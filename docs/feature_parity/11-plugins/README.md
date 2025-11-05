@@ -17,14 +17,14 @@
   已完成 Windows ABI 橋接
 - [x] WASM host implemented  
   已完成 WASM 宿主實作
-- [ ] Plugin admin UI implemented  
-  外掛管理 UI 尚未實作
-- [ ] Unit/integration/E2E tests in place  
-  單元/整合/端到端測試尚未到位
+- [x] Plugin admin UI implemented  
+  已實作外掛管理 UI
+- [x] Unit/integration/E2E tests in place  
+  單元/整合/端到端測試已到位
 - [x] `compatibility.md` updated  
   `compatibility.md` 已更新
-- [ ] Documentation for plugin authors  
-  外掛開發者文件尚未完成
+- [x] Documentation for plugin authors  
+  已完成外掛開發者文件
 
 ## Artifacts / 產出清單
 - Design notes: `design.md`  
@@ -33,6 +33,12 @@
   相容性備註：`compatibility.md`
 - Tests: `tests/`  
   測試資料：`tests/`
+- Plugin authoring guide: `docs/plugins/authoring.md`  
+  外掛開發指南：`docs/plugins/authoring.md`
+- WASM parity report: `wasm_parity.md`  
+  WASM 相容性報告：`wasm_parity.md`
+- Security review: `security_review.md`  
+  安全性檢視：`security_review.md`
 - Related crates: `crates/plugin_winabi`, `crates/plugin_wasm`, `apps/gui-tauri`  
   相關 crate：`crates/plugin_winabi`、`crates/plugin_wasm`、`apps/gui-tauri`
 
@@ -49,12 +55,18 @@
   信任策略要求 `signature.json` 內的 Ed25519 簽章，提供預設簽署者，未簽章外掛預設停用並需使用者另行允許。
 - Windows bridge loads DLL plugins, surfaces command metadata in the GUI, and flags load failures (non-Unicode, missing exports) for review.  
   Windows 橋接可載入 DLL 外掛，在 GUI 呈現命令資訊，並針對非 Unicode 或缺匯出等錯誤顯示警示。
-- Windows message scaffolding (`WindowsMessage`, `dispatch_message`) is in place to wire future command execution.  
-  已建立 `WindowsMessage` / `dispatch_message` 訊息骨架，為後續命令執行鋪路。
-- Added `rustnotepad_plugin_admin` crate to script plugin install/update/remove operations (UI wiring pending).  
-  新增 `rustnotepad_plugin_admin` crate 提供外掛安裝/更新/移除腳本（GUI 串接尚未完成）。
-- Windows message translation/Scintilla shims and Plugin Admin UI remain pending.  
-  Windows 訊息轉譯 / Scintilla 介面與外掛管理 UI 串接仍待完成。
+- Added `rustnotepad_plugin_admin` crate shared by the GUI and CLI for install/update/remove workflows.  
+  新增 `rustnotepad_plugin_admin` crate 供 GUI 與 CLI 共用安裝/更新/移除流程。
+- Settings Plugin page now surfaces install/update/remove workflows (WASM + DLL) and confirms destructive operations.  
+  設定頁已支援 WASM 與 DLL 外掛的安裝/更新/移除流程，並提供操作確認。
+- CLI gains `plugin install` / `plugin remove` commands backed by the shared admin crate.  
+  CLI 新增 `plugin install`、`plugin remove` 指令並重用外掛管理 crate。
+- CLI adds `plugin verify` on Windows to inspect DLL exports without installation.  
+  Windows 版 CLI 新增 `plugin verify` 指令，可在不安裝的情況下檢查 DLL 匯出。
+- Authored WASM parity & security review docs capturing current scope and residual risks.  
+  新增 WASM 相容性與安全性檢視文件，記錄現況與剩餘風險。
+- Windows bridge now applies `NppData` handles, forwards `WM_COMMAND`, and relays notifications via the Scintilla shim; exercised through the automated ABI harness and CLI verifier.  
+  Windows 橋接現已套用 `NppData` 控制代碼、轉送 `WM_COMMAND` 並透過 Scintilla shim 回報事件，並由自動化 ABI 測試與 CLI 驗證涵蓋。
 
 ## Open Questions / 未決議題
 - TBD  
