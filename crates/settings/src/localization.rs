@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -188,6 +188,111 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PluralCategory {
+    Zero,
+    One,
+    Two,
+    Few,
+    Many,
+    Other,
+}
+
+impl PluralCategory {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "zero" => Some(Self::Zero),
+            "one" => Some(Self::One),
+            "two" => Some(Self::Two),
+            "few" => Some(Self::Few),
+            "many" => Some(Self::Many),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PluralMessage {
+    forms: BTreeMap<PluralCategory, String>,
+}
+
+impl PluralMessage {
+    fn template_for<'a>(&'a self, language: &str, count: Option<u64>) -> &'a str {
+        let category = count
+            .map(|value| select_plural_category(language, value))
+            .unwrap_or(PluralCategory::Other);
+        self.forms
+            .get(&category)
+            .or_else(|| self.forms.get(&PluralCategory::Other))
+            .map(|value| value.as_str())
+            .unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Message {
+    Simple(String),
+    Plural(PluralMessage),
+}
+
+impl Message {
+    fn render<'a>(&'a self, language: &str, params: &LocalizationParams<'_>) -> Cow<'a, str> {
+        match self {
+            Message::Simple(text) => render_template(text, params),
+            Message::Plural(plural) => {
+                render_template(plural.template_for(language, params.count), params)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LocalizationParams<'a> {
+    count: Option<u64>,
+    positional: &'a [&'a str],
+}
+
+impl<'a> LocalizationParams<'a> {
+    pub fn new(positional: &'a [&'a str]) -> Self {
+        Self {
+            count: None,
+            positional,
+        }
+    }
+
+    pub fn with_count(positional: &'a [&'a str], count: u64) -> Self {
+        Self {
+            count: Some(count),
+            positional,
+        }
+    }
+
+    pub fn count(&self) -> Option<u64> {
+        self.count
+    }
+
+    pub fn positional(&self) -> &'a [&'a str] {
+        self.positional
+    }
+}
+
+impl LocalizationParams<'static> {
+    pub fn empty() -> Self {
+        LocalizationParams {
+            count: None,
+            positional: &[],
+        }
+    }
+
+    pub fn count_only(count: u64) -> Self {
+        LocalizationParams {
+            count: Some(count),
+            positional: &[],
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum LocalizationError {
     #[error("failed to enumerate locale directory {0}: {1}")]
@@ -198,6 +303,20 @@ pub enum LocalizationError {
     ParseFile(PathBuf, serde_json::Error),
     #[error("duplicate locale code {0}")]
     DuplicateLocale(String),
+    #[error("locale {locale} message '{key}' is missing plural 'other' form")]
+    PluralMissingOther { locale: String, key: String },
+    #[error("locale {locale} message '{key}' contains invalid plural category '{category}'")]
+    InvalidPluralCategory {
+        locale: String,
+        key: String,
+        category: String,
+    },
+    #[error("locale {locale} message '{key}' uses unsupported type '{kind}'")]
+    UnsupportedMessageType {
+        locale: String,
+        key: String,
+        kind: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -209,7 +328,8 @@ pub struct LocaleSummary {
 #[derive(Debug, Clone)]
 struct LocaleCatalog {
     summary: LocaleSummary,
-    strings: HashMap<String, String>,
+    language: String,
+    messages: HashMap<String, Message>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,7 +345,22 @@ struct LocaleFile {
     #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
-    strings: HashMap<String, String>,
+    strings: HashMap<String, LocaleEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LocaleEntry {
+    Simple(String),
+    Typed(LocaleEntryTyped),
+}
+
+#[derive(Debug, Deserialize)]
+struct LocaleEntryTyped {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(flatten)]
+    forms: HashMap<String, String>,
 }
 
 impl LocalizationManager {
@@ -274,15 +409,19 @@ impl LocalizationManager {
                         .clone()
                         .unwrap_or_else(|| file.locale.clone());
 
+                    let language = language_tag(&file.locale);
+                    let messages = build_messages(&file.locale, file.strings)?;
+
                     if file.locale == manager.catalogs[manager.fallback].summary.code {
                         let mut merged = default_strings_map();
-                        merged.extend(file.strings.into_iter());
+                        merged.extend(messages.into_iter());
                         manager.catalogs[manager.fallback] = LocaleCatalog {
                             summary: LocaleSummary {
                                 code: file.locale,
                                 display_name,
                             },
-                            strings: merged,
+                            language,
+                            messages: merged,
                         };
                     } else {
                         if manager
@@ -297,7 +436,8 @@ impl LocalizationManager {
                                 code: file.locale,
                                 display_name,
                             },
-                            strings: file.strings,
+                            language,
+                            messages,
                         });
                     }
                 }
@@ -356,10 +496,20 @@ impl LocalizationManager {
     /// Retrieves a localized string, falling back to English when missing.
     /// （取得指定鍵的在地化字串，若缺少則回退至英文。）
     pub fn text<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
-        if let Some(value) = self.catalogs[self.active].strings.get(key) {
-            Cow::Borrowed(value.as_str())
-        } else if let Some(value) = self.catalogs[self.fallback].strings.get(key) {
-            Cow::Borrowed(value.as_str())
+        self.text_with_params(key, &LocalizationParams::empty())
+    }
+
+    /// Retrieves a localized string, applying parameters when provided.
+    /// （取得在地化字串，必要時套用參數。）
+    pub fn text_with_params<'a>(
+        &'a self,
+        key: &'a str,
+        params: &LocalizationParams<'_>,
+    ) -> Cow<'a, str> {
+        if let Some(message) = self.catalogs[self.active].messages.get(key) {
+            message.render(self.catalogs[self.active].language.as_str(), params)
+        } else if let Some(message) = self.catalogs[self.fallback].messages.get(key) {
+            message.render(self.catalogs[self.fallback].language.as_str(), params)
         } else {
             Cow::Borrowed(key)
         }
@@ -372,14 +522,160 @@ fn default_catalog() -> LocaleCatalog {
             code: DEFAULT_LOCALE_CODE.to_string(),
             display_name: DEFAULT_DISPLAY_NAME.to_string(),
         },
-        strings: default_strings_map(),
+        language: language_tag(DEFAULT_LOCALE_CODE),
+        messages: default_strings_map(),
     }
 }
 
-fn default_strings_map() -> HashMap<String, String> {
+fn default_strings_map() -> HashMap<String, Message> {
     let mut map = HashMap::new();
     for (key, value) in DEFAULT_STRINGS {
-        map.insert((*key).to_string(), (*value).to_string());
+        map.insert((*key).to_string(), Message::Simple((*value).to_string()));
     }
     map
+}
+
+fn build_messages(
+    locale: &str,
+    entries: HashMap<String, LocaleEntry>,
+) -> Result<HashMap<String, Message>, LocalizationError> {
+    let mut messages = HashMap::new();
+    for (key, entry) in entries {
+        let message = match entry {
+            LocaleEntry::Simple(value) => Message::Simple(value),
+            LocaleEntry::Typed(typed) => {
+                if typed.kind != "plural" {
+                    return Err(LocalizationError::UnsupportedMessageType {
+                        locale: locale.to_string(),
+                        key: key.clone(),
+                        kind: typed.kind,
+                    });
+                }
+                let mut forms = BTreeMap::new();
+                for (category, template) in typed.forms {
+                    let parsed = PluralCategory::parse(&category).ok_or(
+                        LocalizationError::InvalidPluralCategory {
+                            locale: locale.to_string(),
+                            key: key.clone(),
+                            category,
+                        },
+                    )?;
+                    forms.insert(parsed, template);
+                }
+                if !forms.contains_key(&PluralCategory::Other) {
+                    return Err(LocalizationError::PluralMissingOther {
+                        locale: locale.to_string(),
+                        key: key.clone(),
+                    });
+                }
+                Message::Plural(PluralMessage { forms })
+            }
+        };
+        messages.insert(key, message);
+    }
+    Ok(messages)
+}
+
+fn render_template<'a>(template: &'a str, params: &LocalizationParams<'_>) -> Cow<'a, str> {
+    if params.count.is_none() && (params.positional.is_empty() || !template.contains('{')) {
+        return Cow::Borrowed(template);
+    }
+
+    let mut current: Cow<'a, str> = Cow::Borrowed(template);
+    if let Some(count) = params.count {
+        let placeholder = "{count}";
+        if current.contains(placeholder) {
+            let replacement = count.to_string();
+            current = Cow::Owned(current.replace(placeholder, &replacement));
+        }
+    }
+
+    for (idx, value) in params.positional.iter().enumerate() {
+        let placeholder = format!("{{{idx}}}");
+        if current.contains(&placeholder) {
+            current = Cow::Owned(current.replace(&placeholder, value));
+        }
+    }
+
+    current
+}
+
+fn language_tag(locale: &str) -> String {
+    locale
+        .split(|ch| ch == '-' || ch == '_')
+        .next()
+        .unwrap_or(locale)
+        .to_ascii_lowercase()
+}
+
+fn select_plural_category(language: &str, count: u64) -> PluralCategory {
+    match language {
+        // Languages without plural distinctions.
+        "ja" | "ko" | "zh" | "th" | "lo" | "ms" | "id" | "vi" => PluralCategory::Other,
+        // French-like rules (0 and 1 => one).
+        "fr" | "ff" | "kab" => {
+            if count == 0 || count == 1 {
+                PluralCategory::One
+            } else {
+                PluralCategory::Other
+            }
+        }
+        // Russian / Ukrainian / Belarusian / Serbo-Croatian rules.
+        "ru" | "uk" | "be" | "bs" | "hr" | "sr" => {
+            let mod10 = count % 10;
+            let mod100 = count % 100;
+            if mod10 == 1 && mod100 != 11 {
+                PluralCategory::One
+            } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
+                PluralCategory::Few
+            } else if mod10 == 0 || (5..=9).contains(&mod10) || (11..=14).contains(&mod100) {
+                PluralCategory::Many
+            } else {
+                PluralCategory::Other
+            }
+        }
+        // Polish rules.
+        "pl" => {
+            let mod10 = count % 10;
+            let mod100 = count % 100;
+            if mod10 == 1 && mod100 != 11 {
+                PluralCategory::One
+            } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
+                PluralCategory::Few
+            } else {
+                PluralCategory::Many
+            }
+        }
+        // Czech and Slovak.
+        "cs" | "sk" => {
+            if count == 1 {
+                PluralCategory::One
+            } else if (2..=4).contains(&count) {
+                PluralCategory::Few
+            } else {
+                PluralCategory::Other
+            }
+        }
+        // Slovenian.
+        "sl" => {
+            let mod100 = count % 100;
+            if mod100 == 1 {
+                PluralCategory::One
+            } else if mod100 == 2 {
+                PluralCategory::Two
+            } else if (3..=4).contains(&mod100) {
+                PluralCategory::Few
+            } else {
+                PluralCategory::Other
+            }
+        }
+        // Default: English-style cardinal rules.
+        _ => {
+            if count == 1 {
+                PluralCategory::One
+            } else {
+                PluralCategory::Other
+            }
+        }
+    }
 }

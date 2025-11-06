@@ -16,7 +16,7 @@
 ### 完成 / Completed
 - 建立 `rustnotepad_plugin_admin` crate，提供外掛安裝、更新、移除的後端流程（WASM 與 DLL） / Added the `rustnotepad_plugin_admin` crate with install/update/remove backends for both WASM and DLL plugins.
 - 在 Windows 版本連結外掛指令按鈕，透過 `WindowsMessage` 轉送 `WM_COMMAND` 以觸發 DLL 回呼 / Wired Windows command buttons to dispatch `WM_COMMAND` via `WindowsMessage`, invoking DLL callbacks.
-- 更新 Feature 3.11 文件與測試計畫，記錄 Plugin Admin 後端與 Windows 橋接狀態 / Updated Feature 3.11 docs and test plan to capture the Plugin Admin backend and Windows bridge progress.
+- 完成 Feature 3.12 Localization/Theme/Preferences 初步實作：新增複數規則與參數化字串、TMTheme 匯入流程、偏好設定 JSON 儲存；同步新增對應測試與 GUI 整合。 / Delivered the first Feature 3.12 localization/theme/preferences milestone: plural-aware localization, TextMate theme import, JSON-backed preferences store, and associated tests plus GUI integration.
 - 完成 GUI 外掛管理頁的安裝/更新/移除流程並新增 CLI `plugin install/remove` 指令；補齊對應測試 / Enabled install/update/remove flows in the GUI plugin page, added CLI `plugin install/remove` commands, and filled in the accompanying tests.
 
 ### 未完成 / Pending

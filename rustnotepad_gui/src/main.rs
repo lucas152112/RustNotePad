@@ -44,8 +44,9 @@ use rustnotepad_project::{
 };
 use rustnotepad_runexec::{RunExecutor, RunResult, RunSpec, StdinPayload};
 use rustnotepad_settings::{
-    Color, LayoutConfig, LocaleSummary, LocalizationManager, PaneLayout, PaneRole, ResolvedPalette,
-    SnippetStore, TabColorTag, TabView, ThemeDefinition, ThemeKind, ThemeManager,
+    Color, LayoutConfig, LocaleSummary, LocalizationManager, LocalizationParams, PaneLayout,
+    PaneRole, Preferences, PreferencesStore, ResolvedPalette, SnippetStore, TabColorTag, TabView,
+    ThemeDefinition, ThemeKind, ThemeManager,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1553,6 +1554,7 @@ impl StatusBarState {
 
 struct RustNotePadApp {
     profile_store: UserProfileStore,
+    preferences_store: PreferencesStore,
     layout: LayoutConfig,
     editor_preview: String,
     bottom_tab_index: usize,
@@ -1667,18 +1669,98 @@ impl RustNotePadApp {
         let profile_path = workspace_root.join("profile.properties");
         let profile_store = UserProfileStore::load(profile_path);
 
+        let preferences_path = workspace_root.join(".rustnotepad").join("preferences.json");
+        let mut preferences_store = match PreferencesStore::load(&preferences_path) {
+            Ok(store) => store,
+            Err(err) => {
+                log_warn(format!(
+                    "Failed to load preferences at {}: {err}",
+                    preferences_path.display()
+                ));
+                PreferencesStore::new(preferences_path.clone(), Preferences::default())
+            }
+        };
+
+        let mut pending_preferences = preferences_store.preferences().clone();
+        let mut migrated_preferences = false;
+
+        if let Some(value) = profile_store.get("preferences.autosave_enabled") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                if pending_preferences.editor.autosave_enabled != parsed {
+                    pending_preferences.editor.autosave_enabled = parsed;
+                    migrated_preferences = true;
+                }
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.autosave_interval_minutes") {
+            if let Ok(parsed) = value.parse::<u32>() {
+                let clamped = parsed.clamp(1, 60);
+                if pending_preferences.editor.autosave_interval_minutes != clamped {
+                    pending_preferences.editor.autosave_interval_minutes = clamped;
+                    migrated_preferences = true;
+                }
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.show_line_numbers") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                if pending_preferences.editor.show_line_numbers != parsed {
+                    pending_preferences.editor.show_line_numbers = parsed;
+                    migrated_preferences = true;
+                }
+            }
+        }
+        if let Some(value) = profile_store.get("preferences.highlight_active_line") {
+            if let Ok(parsed) = value.parse::<bool>() {
+                if pending_preferences.editor.highlight_active_line != parsed {
+                    pending_preferences.editor.highlight_active_line = parsed;
+                    migrated_preferences = true;
+                }
+            }
+        }
+        if let Some(locale_code) = profile_store.get("locale") {
+            if !locale_code.trim().is_empty() && pending_preferences.ui.locale != locale_code {
+                pending_preferences.ui.locale = locale_code.to_string();
+                migrated_preferences = true;
+            }
+        }
+        if let Some(theme_name) = profile_store.get("theme") {
+            if !theme_name.trim().is_empty() && pending_preferences.ui.theme != theme_name {
+                pending_preferences.ui.theme = theme_name.to_string();
+                migrated_preferences = true;
+            }
+        }
+
+        if migrated_preferences {
+            if let Err(err) = preferences_store.overwrite(pending_preferences.clone()) {
+                log_warn(format!(
+                    "Failed to migrate legacy preferences to {}: {err}",
+                    preferences_store.path().display()
+                ));
+            }
+        }
+
+        if let Err(err) = preferences_store.save() {
+            log_warn(format!(
+                "Failed to persist preferences to {}: {err}",
+                preferences_store.path().display()
+            ));
+        }
+
+        let current_preferences = preferences_store.preferences().clone();
+
         let mut localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
             .unwrap_or_else(|_| LocalizationManager::fallback());
-        if let Some(locale_code) = profile_store.get("locale") {
-            if let Some(idx) = localization
-                .locale_summaries()
-                .iter()
-                .position(|summary| summary.code == locale_code)
-            {
-                localization.set_active_by_index(idx);
-            } else {
-                log_warn(format!("Unknown locale in profile: {locale_code}"));
-            }
+        if let Some(idx) = localization
+            .locale_summaries()
+            .iter()
+            .position(|summary| summary.code == current_preferences.ui.locale)
+        {
+            localization.set_active_by_index(idx);
+        } else if current_preferences.ui.locale != "en-US" {
+            log_warn(format!(
+                "Unknown locale in preferences: {}",
+                current_preferences.ui.locale
+            ));
         }
         let locale_summaries = localization.locale_summaries();
         let selected_locale = localization.active_index();
@@ -1695,10 +1777,15 @@ impl RustNotePadApp {
             ])
             .expect("built-in themes")
         });
-        if let Some(theme_name) = profile_store.get("theme") {
-            if theme_manager.set_active_by_name(theme_name).is_none() {
-                log_warn(format!("Unknown theme in profile: {theme_name}"));
-            }
+        if theme_manager
+            .set_active_by_name(&current_preferences.ui.theme)
+            .is_none()
+            && current_preferences.ui.theme != "Midnight Indigo"
+        {
+            log_warn(format!(
+                "Unknown theme in preferences: {}",
+                current_preferences.ui.theme
+            ));
         }
         let palette = theme_manager.active_palette().clone();
         let layout = LayoutConfig::default();
@@ -1807,27 +1894,7 @@ impl RustNotePadApp {
         );
         status.set_locale(&locale_display);
 
-        let mut preferences = PreferencesState::default();
-        if let Some(value) = profile_store.get("preferences.autosave_enabled") {
-            if let Ok(parsed) = value.parse::<bool>() {
-                preferences.autosave_enabled = parsed;
-            }
-        }
-        if let Some(value) = profile_store.get("preferences.autosave_interval_minutes") {
-            if let Ok(parsed) = value.parse::<u32>() {
-                preferences.autosave_interval_minutes = parsed.clamp(1, 60);
-            }
-        }
-        if let Some(value) = profile_store.get("preferences.show_line_numbers") {
-            if let Ok(parsed) = value.parse::<bool>() {
-                preferences.show_line_numbers = parsed;
-            }
-        }
-        if let Some(value) = profile_store.get("preferences.highlight_active_line") {
-            if let Ok(parsed) = value.parse::<bool>() {
-                preferences.highlight_active_line = parsed;
-            }
-        }
+        let preferences = PreferencesState::from(&current_preferences);
 
         let default_macro_name = "Macro 1".to_string();
         let mut plugin_system = PluginSystem::new(&workspace_root);
@@ -1845,6 +1912,7 @@ impl RustNotePadApp {
         };
         let mut app = Self {
             profile_store,
+            preferences_store,
             layout,
             editor_preview: String::new(),
             bottom_tab_index: active_panel_index,
@@ -3522,16 +3590,28 @@ impl RustNotePadApp {
         if !self.preferences_dirty {
             return;
         }
-        let entries = self.preferences_profile_entries();
-        if let Err(err) = self.profile_store.set_all(entries) {
+        let state = self.preferences.clone();
+        if let Err(err) = self.preferences_store.update(|prefs| {
+            state.write_back(prefs);
+        }) {
             log_warn(format!("Failed to persist preferences: {err}"));
         } else {
             self.preferences_dirty = false;
+        }
+        let entries = self.preferences_profile_entries();
+        if let Err(err) = self.profile_store.set_all(entries) {
+            log_warn(format!("Failed to persist preferences: {err}"));
         }
     }
 
     fn persist_locale(&mut self) {
         let code = self.localization.active_code().to_string();
+        let code_for_store = code.clone();
+        if let Err(err) = self.preferences_store.update(|prefs| {
+            prefs.ui.locale = code_for_store.clone();
+        }) {
+            log_warn(format!("Failed to persist locale: {err}"));
+        }
         if let Err(err) = self.profile_store.set("locale", code) {
             log_warn(format!("Failed to persist locale: {err}"));
         }
@@ -3539,6 +3619,12 @@ impl RustNotePadApp {
 
     fn persist_theme(&mut self) {
         let theme_name = self.theme_manager.active_theme().name.clone();
+        let theme_for_store = theme_name.clone();
+        if let Err(err) = self.preferences_store.update(|prefs| {
+            prefs.ui.theme = theme_for_store.clone();
+        }) {
+            log_warn(format!("Failed to persist theme selection: {err}"));
+        }
         if let Err(err) = self.profile_store.set("theme", theme_name) {
             log_warn(format!("Failed to persist theme selection: {err}"));
         }
@@ -3571,12 +3657,11 @@ impl RustNotePadApp {
     }
 
     fn format_indexed(&self, key: &str, values: &[String]) -> String {
-        let mut text = self.text(key).into_owned();
-        for (idx, value) in values.iter().enumerate() {
-            let placeholder = format!("{{{}}}", idx);
-            text = text.replace(&placeholder, value);
-        }
-        text
+        let refs: Vec<&str> = values.iter().map(|value| value.as_str()).collect();
+        let params = LocalizationParams::new(&refs);
+        self.localization
+            .text_with_params(key, &params)
+            .into_owned()
     }
 
     fn workspace_display_name(&self) -> String {
@@ -6127,9 +6212,7 @@ mod tests {
         assert!(
             app.macro_messages
                 .iter()
-                .any(|message| {
-                    message.contains("Inserted") || message.contains("已插入")
-                }),
+                .any(|message| { message.contains("Inserted") || message.contains("已插入") }),
             "macro log should record the insertion event"
         );
 
@@ -6541,5 +6624,25 @@ impl Default for PreferencesState {
             show_line_numbers: true,
             highlight_active_line: true,
         }
+    }
+}
+
+impl From<&Preferences> for PreferencesState {
+    fn from(prefs: &Preferences) -> Self {
+        Self {
+            autosave_enabled: prefs.editor.autosave_enabled,
+            autosave_interval_minutes: prefs.editor.autosave_interval_minutes,
+            show_line_numbers: prefs.editor.show_line_numbers,
+            highlight_active_line: prefs.editor.highlight_active_line,
+        }
+    }
+}
+
+impl PreferencesState {
+    fn write_back(&self, prefs: &mut Preferences) {
+        prefs.editor.autosave_enabled = self.autosave_enabled;
+        prefs.editor.autosave_interval_minutes = self.autosave_interval_minutes;
+        prefs.editor.show_line_numbers = self.show_line_numbers;
+        prefs.editor.highlight_active_line = self.highlight_active_line;
     }
 }

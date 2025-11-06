@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -153,6 +154,354 @@ impl ThemeDefinition {
     pub fn syntax_palette(&self) -> Option<&HighlightPalette> {
         self.syntax.as_ref()
     }
+
+    /// Imports a theme from a TextMate `.tmTheme` file.
+    /// 從 TextMate `.tmTheme` 檔案匯入主題。
+    pub fn from_tmtheme_file(path: impl AsRef<Path>) -> Result<Self, ThemeLoadError> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)?;
+        let value = parse_tmtheme(&contents)?;
+        let fallback = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Imported tmTheme");
+        Self::from_tmtheme_value(&value, fallback)
+    }
+
+    fn from_tmtheme_value(value: &TmValue, fallback_name: &str) -> Result<Self, ThemeLoadError> {
+        let dict = value
+            .as_dict()
+            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme root must be a dictionary"))?;
+
+        let name = dict
+            .get("name")
+            .and_then(TmValue::as_string)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| fallback_name.to_string());
+
+        let settings = dict
+            .get("settings")
+            .and_then(TmValue::as_array)
+            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme missing settings array"))?;
+
+        let general = settings
+            .iter()
+            .find_map(extract_general_settings)
+            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme missing base settings"))?;
+
+        let foreground = general
+            .get("foreground")
+            .and_then(TmValue::as_string)
+            .unwrap_or("#D4D4D4");
+        let background = general
+            .get("background")
+            .and_then(TmValue::as_string)
+            .unwrap_or("#1E1E1E");
+        let caret = general
+            .get("caret")
+            .and_then(TmValue::as_string)
+            .unwrap_or("#569CD6");
+        let selection = general
+            .get("selection")
+            .and_then(TmValue::as_string)
+            .unwrap_or("#264F78");
+
+        let palette = ThemePalette {
+            background: background.to_string(),
+            panel: background.to_string(),
+            accent: selection.to_string(),
+            accent_text: foreground.to_string(),
+            editor_background: background.to_string(),
+            editor_text: foreground.to_string(),
+            status_bar: caret.to_string(),
+        };
+
+        let kind = infer_kind_from_background(&palette.editor_background)?;
+        let description = Some("Imported from TextMate tmTheme".to_string());
+
+        let definition = ThemeDefinition {
+            name,
+            description,
+            kind,
+            palette,
+            fonts: FontSettings {
+                ui_family: "Inter".into(),
+                ui_size: 16,
+                editor_family: "JetBrains Mono".into(),
+                editor_size: 15,
+            },
+            syntax: None,
+        };
+
+        definition.validate()?;
+        Ok(definition)
+    }
+}
+
+// TextMate `.tmTheme` parsing helpers.
+// TextMate `.tmTheme` 解析工具集合。
+#[derive(Debug, Clone)]
+enum TmValue {
+    String(String),
+    Dict(BTreeMap<String, TmValue>),
+    Array(Vec<TmValue>),
+}
+
+impl TmValue {
+    fn as_string(&self) -> Option<&str> {
+        match self {
+            TmValue::String(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    fn as_dict(&self) -> Option<&BTreeMap<String, TmValue>> {
+        match self {
+            TmValue::Dict(map) => Some(map),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&[TmValue]> {
+        match self {
+            TmValue::Array(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TmToken<'a> {
+    StartDict,
+    EndDict,
+    StartArray,
+    EndArray,
+    Key(&'a str),
+    Text(&'a str),
+}
+
+struct TokenStream<'a> {
+    tokens: Vec<TmToken<'a>>,
+    index: usize,
+}
+
+impl<'a> TokenStream<'a> {
+    fn new(tokens: Vec<TmToken<'a>>) -> Self {
+        Self { tokens, index: 0 }
+    }
+
+    fn peek(&self) -> Option<&TmToken<'a>> {
+        self.tokens.get(self.index)
+    }
+
+    fn next(&mut self) -> Option<TmToken<'a>> {
+        if let Some(token) = self.tokens.get(self.index) {
+            self.index += 1;
+            Some(token.clone())
+        } else {
+            None
+        }
+    }
+}
+
+fn parse_tmtheme(input: &str) -> Result<TmValue, ThemeLoadError> {
+    let tokens = tokenize_tmtheme(input)?;
+    let mut stream = TokenStream::new(tokens);
+    let value = parse_tm_value(&mut stream)?;
+    if stream.peek().is_some() {
+        return Err(ThemeLoadError::InvalidFormat(
+            "tmTheme parse error (unexpected trailing tokens)",
+        ));
+    }
+    Ok(value)
+}
+
+fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
+    let mut tokens = Vec::new();
+    let mut rest = input;
+
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+
+        let Some(idx) = rest.find('<') else {
+            break;
+        };
+        if idx > 0 {
+            rest = &rest[idx..];
+        }
+
+        if rest.starts_with("<?") {
+            let end = rest.find("?>").ok_or(ThemeLoadError::InvalidFormat(
+                "tmTheme parse error (unterminated processing instruction)",
+            ))?;
+            rest = &rest[end + 2..];
+            continue;
+        }
+
+        if rest.starts_with("<!--") {
+            let end = rest.find("-->").ok_or(ThemeLoadError::InvalidFormat(
+                "tmTheme parse error (unterminated comment)",
+            ))?;
+            rest = &rest[end + 3..];
+            continue;
+        }
+
+        if rest.starts_with("</") {
+            let end = rest.find('>').ok_or(ThemeLoadError::InvalidFormat(
+                "tmTheme parse error (unterminated closing tag)",
+            ))?;
+            let tag = &rest[2..end];
+            match tag {
+                "dict" => tokens.push(TmToken::EndDict),
+                "array" => tokens.push(TmToken::EndArray),
+                _ => {}
+            }
+            rest = &rest[end + 1..];
+            continue;
+        }
+
+        if rest.starts_with("<dict>") {
+            tokens.push(TmToken::StartDict);
+            rest = &rest["<dict>".len()..];
+            continue;
+        }
+        if rest.starts_with("<array>") {
+            tokens.push(TmToken::StartArray);
+            rest = &rest["<array>".len()..];
+            continue;
+        }
+        if rest.starts_with("<key>") {
+            let (value, remainder) = extract_tag_text(rest, "key").ok_or(
+                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <key>)"),
+            )?;
+            tokens.push(TmToken::Key(value));
+            rest = remainder;
+            continue;
+        }
+        if rest.starts_with("<string>") {
+            let (value, remainder) = extract_tag_text(rest, "string").ok_or(
+                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <string>)"),
+            )?;
+            tokens.push(TmToken::Text(value));
+            rest = remainder;
+            continue;
+        }
+        if rest.starts_with("<integer>") {
+            let (value, remainder) = extract_tag_text(rest, "integer").ok_or(
+                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <integer>)"),
+            )?;
+            tokens.push(TmToken::Text(value));
+            rest = remainder;
+            continue;
+        }
+        if rest.starts_with("<real>") {
+            let (value, remainder) = extract_tag_text(rest, "real").ok_or(
+                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <real>)"),
+            )?;
+            tokens.push(TmToken::Text(value));
+            rest = remainder;
+            continue;
+        }
+        if rest.starts_with("<true/>") {
+            tokens.push(TmToken::Text("true"));
+            rest = &rest["<true/>".len()..];
+            continue;
+        }
+        if rest.starts_with("<false/>") {
+            tokens.push(TmToken::Text("false"));
+            rest = &rest["<false/>".len()..];
+            continue;
+        }
+
+        let end = rest.find('>').ok_or(ThemeLoadError::InvalidFormat(
+            "tmTheme parse error (unterminated tag)",
+        ))?;
+        rest = &rest[end + 1..];
+    }
+
+    Ok(tokens)
+}
+
+fn parse_tm_value(stream: &mut TokenStream<'_>) -> Result<TmValue, ThemeLoadError> {
+    let Some(token) = stream.next() else {
+        return Err(ThemeLoadError::InvalidFormat(
+            "tmTheme parse error (unexpected end of input)",
+        ));
+    };
+    match token {
+        TmToken::StartDict => parse_tm_dict(stream).map(TmValue::Dict),
+        TmToken::StartArray => parse_tm_array(stream).map(TmValue::Array),
+        TmToken::Text(text) => Ok(TmValue::String(text.to_string())),
+        _ => Err(ThemeLoadError::InvalidFormat(
+            "tmTheme parse error (unexpected token)",
+        )),
+    }
+}
+
+fn parse_tm_dict(
+    stream: &mut TokenStream<'_>,
+) -> Result<BTreeMap<String, TmValue>, ThemeLoadError> {
+    let mut map = BTreeMap::new();
+    loop {
+        match stream.peek() {
+            Some(TmToken::EndDict) => {
+                stream.next();
+                break;
+            }
+            Some(TmToken::Key(key)) => {
+                let key = key.to_string();
+                stream.next();
+                let value = parse_tm_value(stream)?;
+                map.insert(key, value);
+            }
+            None => {
+                return Err(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unexpected end of input)",
+                ))
+            }
+            _ => {
+                return Err(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (expected key)",
+                ))
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn parse_tm_array(stream: &mut TokenStream<'_>) -> Result<Vec<TmValue>, ThemeLoadError> {
+    let mut items = Vec::new();
+    loop {
+        match stream.peek() {
+            Some(TmToken::EndArray) => {
+                stream.next();
+                break;
+            }
+            Some(_) => {
+                let value = parse_tm_value(stream)?;
+                items.push(value);
+            }
+            None => {
+                return Err(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unexpected end of input)",
+                ))
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn extract_tag_text<'a>(input: &'a str, tag: &str) -> Option<(&'a str, &'a str)> {
+    let open_end = input.find('>')?;
+    let close_tag = format!("</{tag}>");
+    let close_pos = input.find(&close_tag)?;
+    let content = &input[open_end + 1..close_pos];
+    let trimmed = content.trim();
+    let remainder = &input[close_pos + close_tag.len()..];
+    Some((trimmed, remainder))
 }
 
 fn builtin_dark_syntax() -> HighlightPalette {
@@ -182,6 +531,40 @@ fn builtin_light_syntax() -> HighlightPalette {
 fn parse_syntax_palette(value: &JsonValue) -> Result<HighlightPalette, ThemeLoadError> {
     let serde_value = to_serde_value(value)?;
     parse_highlight_palette(&serde_value).map_err(ThemeLoadError::from)
+}
+
+fn extract_general_settings(entry: &TmValue) -> Option<&BTreeMap<String, TmValue>> {
+    let dict = entry.as_dict()?;
+    if dict.contains_key("scope") {
+        return None;
+    }
+    dict.get("settings")?.as_dict()
+}
+
+fn infer_kind_from_background(hex: &str) -> Result<ThemeKind, ThemeLoadError> {
+    let color = Color::from_hex(hex)?;
+    let luminance = relative_luminance(&color);
+    Ok(if luminance >= 0.6 {
+        ThemeKind::Light
+    } else {
+        ThemeKind::Dark
+    })
+}
+
+fn relative_luminance(color: &Color) -> f32 {
+    fn channel(value: u8) -> f32 {
+        let normalized = value as f32 / 255.0;
+        if normalized <= 0.03928 {
+            normalized / 12.92
+        } else {
+            ((normalized + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let r = channel(color.r);
+    let g = channel(color.g);
+    let b = channel(color.b);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 fn to_serde_value(value: &JsonValue) -> Result<serde_json::Value, ThemeLoadError> {
@@ -428,6 +811,7 @@ pub enum ThemeLoadError {
     InvalidField(&'static str),
     MissingField(&'static str),
     InvalidKind(String),
+    InvalidFormat(&'static str),
     Empty,
     Syntax(ThemeParseError),
 }
@@ -446,6 +830,7 @@ impl fmt::Display for ThemeLoadError {
             }
             ThemeLoadError::MissingField(field) => write!(f, "missing field '{field}'"),
             ThemeLoadError::InvalidKind(value) => write!(f, "invalid theme kind '{value}'"),
+            ThemeLoadError::InvalidFormat(reason) => write!(f, "{reason}"),
             ThemeLoadError::Empty => write!(f, "no theme definitions were provided"),
             ThemeLoadError::Syntax(err) => err.fmt(f),
         }
