@@ -14,6 +14,8 @@ use rustnotepad_plugin_winabi::LoadedPlugin;
 use rustnotepad_search::{
     FileSearchResult, ReplaceAllOutcome, SearchEngine, SearchMode, SearchOptions, SearchReport,
 };
+use rustnotepad_settings::{PreferencesStore, ThemeDefinition, ThemeManager};
+use serde_json::Value as SerdeValue;
 use walkdir::WalkDir;
 
 #[derive(Parser)]
@@ -40,6 +42,15 @@ enum Commands {
     /// 管理 RustNotePad 外掛（安裝/移除）。 / Manage RustNotePad plugins (install/remove).
     #[command(subcommand)]
     Plugin(PluginCommand),
+    /// 管理語言包。 / Manage localization packs.
+    #[command(subcommand)]
+    Localization(LocalizationCommand),
+    /// 匯入/匯出主題。 / Import or export themes.
+    #[command(subcommand)]
+    Themes(ThemesCommand),
+    /// 匯入/匯出偏好設定。 / Import or export preferences.
+    #[command(subcommand)]
+    Preferences(PreferencesCommand),
 }
 
 #[derive(Args)]
@@ -218,6 +229,68 @@ struct PluginVerifyArgs {
     show_commands: bool,
 }
 
+#[derive(Subcommand)]
+enum LocalizationCommand {
+    /// 安裝語言包 JSON。 / Install a localization JSON file.
+    Install(LocalizationInstallArgs),
+}
+
+#[derive(Args)]
+struct LocalizationInstallArgs {
+    /// 語言包 JSON 路徑。 / Path to the localization JSON file.
+    #[arg(value_name = "FILE")]
+    source: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum ThemesCommand {
+    /// 匯入 Notepad++/tmTheme/Sublime 主題。 / Import a theme file.
+    Import(ThemeImportArgs),
+    /// 匯出目前可用的主題。 / Export a theme to JSON.
+    Export(ThemeExportArgs),
+    /// 列出已安裝主題。 / List available themes.
+    List,
+}
+
+#[derive(Args)]
+struct ThemeImportArgs {
+    /// 主題來源檔案。 / Theme file to import.
+    #[arg(value_name = "FILE")]
+    source: PathBuf,
+}
+
+#[derive(Args)]
+struct ThemeExportArgs {
+    /// 要匯出的主題名稱。 / Theme name to export.
+    #[arg(long, short = 'n', value_name = "NAME")]
+    name: String,
+    /// 輸出檔案路徑。 / Destination file path.
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum PreferencesCommand {
+    /// 匯出目前偏好設定。 / Export current preferences.
+    Export(PreferencesExportArgs),
+    /// 匯入偏好設定 JSON。 / Import preferences from JSON.
+    Import(PreferencesImportArgs),
+}
+
+#[derive(Args)]
+struct PreferencesExportArgs {
+    /// 輸出檔案路徑。 / Destination file path.
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct PreferencesImportArgs {
+    /// 輸入檔案路徑。 / Source preferences JSON.
+    #[arg(value_name = "FILE")]
+    input: PathBuf,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("Error: {err}");
@@ -231,8 +304,20 @@ fn run() -> Result<()> {
         Commands::Convert(args) => execute_convert(args),
         Commands::Search(args) => execute_search(args),
         Commands::Plugin(subcommand) => {
-            let workspace_root = resolve_workspace(workspace)?;
+            let workspace_root = resolve_workspace(workspace.clone())?;
             execute_plugin_command(subcommand, &workspace_root)
+        }
+        Commands::Localization(subcommand) => {
+            let workspace_root = resolve_workspace(workspace.clone())?;
+            execute_localization_command(subcommand, &workspace_root)
+        }
+        Commands::Themes(subcommand) => {
+            let workspace_root = resolve_workspace(workspace.clone())?;
+            execute_themes_command(subcommand, &workspace_root)
+        }
+        Commands::Preferences(subcommand) => {
+            let workspace_root = resolve_workspace(workspace)?;
+            execute_preferences_command(subcommand, &workspace_root)
         }
     }
 }
@@ -387,6 +472,197 @@ fn verify_plugin(args: PluginVerifyArgs) -> Result<()> {
         println!("Exported commands: {}", plugin.commands().len());
     }
     Ok(())
+}
+
+fn execute_localization_command(command: LocalizationCommand, workspace_root: &Path) -> Result<()> {
+    match command {
+        LocalizationCommand::Install(args) => install_localization(args, workspace_root),
+    }
+}
+
+fn install_localization(args: LocalizationInstallArgs, workspace_root: &Path) -> Result<()> {
+    let source = resolve_input_path(&args.source)?;
+    if !source.exists() {
+        bail!("localization source '{}' does not exist", source.display());
+    }
+    let data = fs::read_to_string(&source)
+        .with_context(|| format!("failed to read {}", source.display()))?;
+    let parsed: SerdeValue = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse localization file {}", source.display()))?;
+    let locale_code = parsed
+        .get("locale")
+        .and_then(|value| value.as_str())
+        .map(|code| sanitize_locale_code(code));
+    let file_name = if let Some(code) = &locale_code {
+        format!("{code}.json")
+    } else {
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|value| value.to_string())
+            .ok_or_else(|| anyhow!("source path must include a file name"))?
+    };
+    let dest_dir = localization_dir(workspace_root);
+    fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+    let dest_path = dest_dir.join(&file_name);
+    fs::write(&dest_path, data.into_bytes())
+        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    println!(
+        "Installed localization '{}' to {}",
+        locale_code.as_deref().unwrap_or_else(|| file_name.as_str()),
+        dest_path.display()
+    );
+    Ok(())
+}
+
+fn execute_themes_command(command: ThemesCommand, workspace_root: &Path) -> Result<()> {
+    match command {
+        ThemesCommand::Import(args) => import_theme(args, workspace_root),
+        ThemesCommand::Export(args) => export_theme(args, workspace_root),
+        ThemesCommand::List => list_themes(workspace_root),
+    }
+}
+
+fn import_theme(args: ThemeImportArgs, workspace_root: &Path) -> Result<()> {
+    let source = resolve_input_path(&args.source)?;
+    if !source.exists() {
+        bail!("theme source '{}' does not exist", source.display());
+    }
+    let definition = load_theme_definition(&source)?;
+    let user_dir = theme_dir(workspace_root);
+    fs::create_dir_all(&user_dir)
+        .with_context(|| format!("failed to create {}", user_dir.display()))?;
+    let slug = ThemeDefinition::slug_for(&definition.name);
+    let dest_path = user_dir.join(format!("{slug}.json"));
+    fs::write(&dest_path, definition.to_json_string())
+        .with_context(|| format!("failed to write {}", dest_path.display()))?;
+    println!(
+        "Imported theme '{}' to {}",
+        definition.name,
+        dest_path.display()
+    );
+    Ok(())
+}
+
+fn export_theme(args: ThemeExportArgs, workspace_root: &Path) -> Result<()> {
+    let manager = load_theme_manager(workspace_root)?;
+    let theme = manager
+        .themes()
+        .find(|theme| theme.name == args.name)
+        .ok_or_else(|| anyhow!("theme '{}' was not found", args.name))?;
+    let output = resolve_input_path(&args.output)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&output, theme.to_json_string())
+        .with_context(|| format!("failed to write {}", output.display()))?;
+    println!("Exported theme '{}' to {}", theme.name, output.display());
+    Ok(())
+}
+
+fn list_themes(workspace_root: &Path) -> Result<()> {
+    let manager = load_theme_manager(workspace_root)?;
+    println!("Available themes:");
+    for name in manager.theme_names() {
+        println!("  - {name}");
+    }
+    Ok(())
+}
+
+fn load_theme_definition(path: &Path) -> Result<ThemeDefinition> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let definition = match extension.as_str() {
+        "tmtheme" => ThemeDefinition::from_tmtheme_file(path),
+        "xml" => ThemeDefinition::from_notepad_xml(path),
+        "sublime-color-scheme" | "sublime-syntax" => {
+            ThemeDefinition::from_sublime_color_scheme(path)
+        }
+        other => bail!(
+            "unsupported theme format '{}'; expected .tmTheme, .xml, or .sublime-color-scheme",
+            other
+        ),
+    }
+    .with_context(|| format!("failed to import theme {}", path.display()))?;
+    Ok(definition)
+}
+
+fn execute_preferences_command(command: PreferencesCommand, workspace_root: &Path) -> Result<()> {
+    match command {
+        PreferencesCommand::Export(args) => export_preferences(args, workspace_root),
+        PreferencesCommand::Import(args) => import_preferences(args, workspace_root),
+    }
+}
+
+fn export_preferences(args: PreferencesExportArgs, workspace_root: &Path) -> Result<()> {
+    let prefs_path = preferences_path(workspace_root);
+    let store = PreferencesStore::load(&prefs_path)
+        .with_context(|| format!("failed to load preferences from {}", prefs_path.display()))?;
+    let output = resolve_input_path(&args.output)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    store
+        .export_to(&output)
+        .with_context(|| format!("failed to export preferences to {}", output.display()))?;
+    println!("Exported preferences to {}", output.display());
+    Ok(())
+}
+
+fn import_preferences(args: PreferencesImportArgs, workspace_root: &Path) -> Result<()> {
+    let prefs_path = preferences_path(workspace_root);
+    let mut store = PreferencesStore::load(&prefs_path)
+        .with_context(|| format!("failed to load preferences from {}", prefs_path.display()))?;
+    let input = resolve_input_path(&args.input)?;
+    if !input.exists() {
+        bail!("preferences file '{}' does not exist", input.display());
+    }
+    store
+        .import_from(&input)
+        .with_context(|| format!("failed to import preferences from {}", input.display()))?;
+    println!("Imported preferences from {}", input.display());
+    Ok(())
+}
+
+fn localization_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".rustnotepad").join("langs")
+}
+
+fn theme_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".rustnotepad").join("themes")
+}
+
+fn preferences_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".rustnotepad").join("preferences.json")
+}
+
+fn sanitize_locale_code(input: &str) -> String {
+    let mut slug = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            slug.push(ch);
+        } else if ch.is_ascii_whitespace() || ch == '.' {
+            if !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+    }
+    if slug.is_empty() {
+        "locale".to_string()
+    } else {
+        slug
+    }
+}
+
+fn load_theme_manager(workspace_root: &Path) -> Result<ThemeManager> {
+    let dirs = vec![PathBuf::from("assets/themes"), theme_dir(workspace_root)];
+    ThemeManager::load_from_dirs(dirs).map_err(|err| anyhow!("failed to load themes: {err}"))
 }
 
 fn detect_plugin_kind(source: &Path) -> Result<PluginInstallKind> {

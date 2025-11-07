@@ -108,3 +108,58 @@ fn plural_requires_other_category() {
         other => panic!("unexpected error: {other:?}"),
     }
 }
+
+#[test]
+fn catalog_stats_report_counts() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("ru-RU.json");
+    fs::write(
+        &path,
+        r#"
+        {
+            "locale": "ru-RU",
+            "strings": {
+                "notifications.count": {
+                    "type": "plural",
+                    "one": "{count} уведомление",
+                    "few": "{count} уведомления",
+                    "many": "{count} уведомлений",
+                    "other": "{count} уведомлений"
+                }
+            }
+        }
+        "#,
+    )
+    .expect("write locale");
+
+    let manager = LocalizationManager::load_from_dir(temp.path(), "en-US").expect("load");
+    let stats = manager.catalog_stats();
+    assert!(stats
+        .iter()
+        .any(|locale| locale.code == "ru-RU" && locale.plural_entries == 1));
+    assert!(stats
+        .iter()
+        .any(|locale| locale.code == manager.fallback_code()));
+}
+
+#[test]
+fn missing_keys_reports_differences() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("fr.json");
+    fs::write(
+        &path,
+        r#"
+        {
+            "locale": "fr",
+            "strings": {
+                "menu.file": "Fichier"
+            }
+        }
+        "#,
+    )
+    .expect("write locale");
+
+    let manager = LocalizationManager::load_from_dir(temp.path(), "en-US").expect("load");
+    let missing = manager.missing_keys("fr").expect("locale present");
+    assert!(missing.iter().any(|key| key == "menu.edit"));
+}

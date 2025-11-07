@@ -46,7 +46,7 @@ use rustnotepad_runexec::{RunExecutor, RunResult, RunSpec, StdinPayload};
 use rustnotepad_settings::{
     Color, LayoutConfig, LocaleSummary, LocalizationManager, LocalizationParams, PaneLayout,
     PaneRole, Preferences, PreferencesStore, ResolvedPalette, SnippetStore, TabColorTag, TabView,
-    ThemeDefinition, ThemeKind, ThemeManager,
+    ThemeDefinition, ThemeKind, ThemeLoadError, ThemeManager,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1566,7 +1566,13 @@ struct RustNotePadApp {
     theme_manager: ThemeManager,
     palette: ResolvedPalette,
     status: StatusBarState,
+    user_theme_dir: PathBuf,
     pending_theme_refresh: bool,
+    theme_import_path: String,
+    theme_import_status: Option<UiMessage>,
+    preferences_export_path: String,
+    preferences_import_path: String,
+    preferences_transfer_status: Option<UiMessage>,
     fonts_installed: bool,
     cjk_font_available: bool,
     font_warning: Option<String>,
@@ -1748,6 +1754,14 @@ impl RustNotePadApp {
 
         let current_preferences = preferences_store.preferences().clone();
 
+        let user_theme_dir = workspace_root.join(".rustnotepad").join("themes");
+        if let Err(err) = fs::create_dir_all(&user_theme_dir) {
+            log_warn(format!(
+                "Failed to prepare user theme directory {}: {err}",
+                user_theme_dir.display()
+            ));
+        }
+
         let mut localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
             .unwrap_or_else(|_| LocalizationManager::fallback());
         if let Some(idx) = localization
@@ -1770,7 +1784,11 @@ impl RustNotePadApp {
             .unwrap_or_else(|| "English (en-US)".to_string());
         let sample_editor_content = String::new();
 
-        let mut theme_manager = ThemeManager::load_from_dir("assets/themes").unwrap_or_else(|_| {
+        let mut theme_manager = ThemeManager::load_from_dirs(vec![
+            PathBuf::from("assets/themes"),
+            user_theme_dir.clone(),
+        ])
+        .unwrap_or_else(|_| {
             ThemeManager::new(vec![
                 ThemeDefinition::builtin_dark(),
                 ThemeDefinition::builtin_light(),
@@ -1924,7 +1942,13 @@ impl RustNotePadApp {
             theme_manager,
             palette,
             status,
+            user_theme_dir,
             pending_theme_refresh: true,
+            theme_import_path: String::new(),
+            theme_import_status: None,
+            preferences_export_path: String::new(),
+            preferences_import_path: String::new(),
+            preferences_transfer_status: None,
             fonts_installed: false,
             cjk_font_available: false,
             font_warning: None,
@@ -3630,6 +3654,211 @@ impl RustNotePadApp {
         }
     }
 
+    fn resolve_workspace_path(&self, input: &str) -> Result<PathBuf, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(self
+                .localized("Please enter a file path.", "請輸入檔案路徑。")
+                .to_string());
+        }
+        let candidate = PathBuf::from(trimmed);
+        if candidate.is_absolute() {
+            Ok(candidate)
+        } else {
+            Ok(self.workspace_root.join(candidate))
+        }
+    }
+
+    fn export_preferences_to_path(&mut self) {
+        let path = match self.resolve_workspace_path(&self.preferences_export_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.set_preferences_status(message, true);
+                return;
+            }
+        };
+        match self.preferences_store.export_to(&path) {
+            Ok(_) => {
+                let message = self.localized_owned(
+                    format!("Preferences exported to {}", path.display()),
+                    format!("偏好設定已匯出至 {}", path.display()),
+                );
+                self.set_preferences_status(message, false);
+            }
+            Err(err) => {
+                self.set_preferences_status(
+                    self.localized_owned(
+                        format!("Failed to export preferences: {err}"),
+                        format!("匯出偏好設定失敗：{err}"),
+                    ),
+                    true,
+                );
+            }
+        }
+    }
+
+    fn import_preferences_from_path(&mut self) {
+        let path = match self.resolve_workspace_path(&self.preferences_import_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.set_preferences_status(message, true);
+                return;
+            }
+        };
+        match self.preferences_store.import_from(&path) {
+            Ok(_) => {
+                self.apply_preferences_after_import();
+                let message = self.localized_owned(
+                    format!("Preferences imported from {}", path.display()),
+                    format!("已自 {} 匯入偏好設定", path.display()),
+                );
+                self.set_preferences_status(message, false);
+            }
+            Err(err) => {
+                self.set_preferences_status(
+                    self.localized_owned(
+                        format!("Failed to import preferences: {err}"),
+                        format!("匯入偏好設定失敗：{err}"),
+                    ),
+                    true,
+                );
+            }
+        }
+    }
+
+    fn apply_preferences_after_import(&mut self) {
+        let preferences = self.preferences_store.preferences().clone();
+        self.preferences = PreferencesState::from(&preferences);
+        self.preferences_dirty = false;
+        let summaries = self.localization.locale_summaries();
+        if let Some(idx) = summaries
+            .iter()
+            .position(|summary| summary.code == preferences.ui.locale)
+        {
+            self.apply_locale_change(idx, &summaries);
+        }
+        if self
+            .theme_manager
+            .set_active_by_name(&preferences.ui.theme)
+            .is_some()
+        {
+            self.pending_theme_refresh = true;
+            self.status
+                .set_theme(&self.theme_manager.active_theme().name);
+        }
+        self.persist_locale();
+        self.persist_theme();
+    }
+
+    fn import_theme_from_path(&mut self) {
+        let path = match self.resolve_workspace_path(&self.theme_import_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.set_theme_import_status(message, true);
+                return;
+            }
+        };
+        if !path.exists() {
+            self.set_theme_import_status(
+                self.localized_owned(
+                    format!("File {} does not exist.", path.display()),
+                    format!("檔案 {} 不存在。", path.display()),
+                ),
+                true,
+            );
+            return;
+        }
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let definition_result = match extension.as_str() {
+            "tmtheme" => ThemeDefinition::from_tmtheme_file(&path),
+            "xml" => ThemeDefinition::from_notepad_xml(&path),
+            "sublime-color-scheme" | "sublime-syntax" => {
+                ThemeDefinition::from_sublime_color_scheme(&path)
+            }
+            other => Err(ThemeLoadError::InvalidKind(other.to_string())),
+        };
+        let definition = match definition_result {
+            Ok(definition) => definition,
+            Err(err) => {
+                self.set_theme_import_status(
+                    self.localized_owned(
+                        format!("Failed to import theme: {err}"),
+                        format!("匯入主題失敗：{err}"),
+                    ),
+                    true,
+                );
+                return;
+            }
+        };
+        if let Err(err) = self.persist_imported_theme(&definition) {
+            self.set_theme_import_status(
+                self.localized_owned(
+                    format!("Failed to save imported theme: {err}"),
+                    format!("儲存匯入的主題失敗：{err}"),
+                ),
+                true,
+            );
+            return;
+        }
+        if let Err(err) = self.reload_theme_manager_for(Some(&definition.name)) {
+            self.set_theme_import_status(
+                self.localized_owned(
+                    format!("Imported theme but failed to reload: {err}"),
+                    format!("主題已匯入但重新載入失敗：{err}"),
+                ),
+                true,
+            );
+            return;
+        }
+        self.persist_theme();
+        self.set_theme_import_status(
+            self.localized_owned(
+                format!("Theme '{}' imported successfully.", definition.name),
+                format!("主題「{}」匯入成功。", definition.name),
+            ),
+            false,
+        );
+    }
+
+    fn persist_imported_theme(&self, definition: &ThemeDefinition) -> Result<(), io::Error> {
+        fs::create_dir_all(&self.user_theme_dir)?;
+        let slug = ThemeDefinition::slug_for(&definition.name);
+        let dest = self.user_theme_dir.join(format!("{slug}.json"));
+        fs::write(dest, definition.to_json_string())
+    }
+
+    fn reload_theme_manager_for(&mut self, preferred: Option<&str>) -> Result<(), ThemeLoadError> {
+        let dirs = vec![PathBuf::from("assets/themes"), self.user_theme_dir.clone()];
+        let mut manager = ThemeManager::load_from_dirs(dirs)?;
+        if let Some(name) = preferred {
+            manager.set_active_by_name(name);
+        }
+        self.theme_manager = manager;
+        self.palette = self.theme_manager.active_palette().clone();
+        self.status
+            .set_theme(&self.theme_manager.active_theme().name);
+        self.pending_theme_refresh = true;
+        Ok(())
+    }
+
+    fn set_preferences_status(&mut self, message: String, is_error: bool) {
+        self.preferences_transfer_status = Some(UiMessage {
+            text: message,
+            is_error,
+        });
+    }
+
+    fn set_theme_import_status(&mut self, message: String, is_error: bool) {
+        self.theme_import_status = Some(UiMessage {
+            text: message,
+            is_error,
+        });
+    }
+
     fn seed_profile_defaults(&mut self) {
         let mut entries = Vec::new();
         if self.profile_store.get("locale").is_none() {
@@ -5320,6 +5549,45 @@ impl RustNotePadApp {
         }
         ui.add_space(12.0);
         ui.label(RichText::new(self.text("settings.preferences.note").to_string()).italics());
+        ui.separator();
+        ui.heading(
+            self.text("settings.preferences.transfer_heading")
+                .to_string(),
+        );
+        ui.label(self.text("settings.preferences.transfer_hint").to_string());
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(self.text("settings.preferences.export_path").to_string());
+            ui.add(
+                egui::TextEdit::singleline(&mut self.preferences_export_path).desired_width(220.0),
+            );
+            if ui
+                .button(self.text("settings.preferences.export_button").to_string())
+                .clicked()
+            {
+                self.export_preferences_to_path();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(self.text("settings.preferences.import_path").to_string());
+            ui.add(
+                egui::TextEdit::singleline(&mut self.preferences_import_path).desired_width(220.0),
+            );
+            if ui
+                .button(self.text("settings.preferences.import_button").to_string())
+                .clicked()
+            {
+                self.import_preferences_from_path();
+            }
+        });
+        if let Some(message) = &self.preferences_transfer_status {
+            let color = if message.is_error {
+                Color32::from_rgb(239, 68, 68)
+            } else {
+                Color32::from_rgb(16, 185, 129)
+            };
+            ui.colored_label(color, &message.text);
+        }
         self.persist_preferences_if_dirty();
     }
 
@@ -5351,6 +5619,26 @@ impl RustNotePadApp {
         }
         ui.add_space(12.0);
         ui.label(RichText::new(self.text("settings.style.note").to_string()).italics());
+        ui.separator();
+        ui.heading(self.text("settings.style.import_heading").to_string());
+        ui.label(self.text("settings.style.import_hint").to_string());
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.theme_import_path).desired_width(260.0));
+            if ui
+                .button(self.text("settings.style.import_button").to_string())
+                .clicked()
+            {
+                self.import_theme_from_path();
+            }
+        });
+        if let Some(message) = &self.theme_import_status {
+            let color = if message.is_error {
+                Color32::from_rgb(239, 68, 68)
+            } else {
+                Color32::from_rgb(16, 185, 129)
+            };
+            ui.colored_label(color, &message.text);
+        }
     }
 
     fn render_placeholder_page(&self, ui: &mut egui::Ui, key: &str) {
@@ -6645,4 +6933,10 @@ impl PreferencesState {
         prefs.editor.show_line_numbers = self.show_line_numbers;
         prefs.editor.highlight_active_line = self.highlight_active_line;
     }
+}
+
+#[derive(Debug, Clone)]
+struct UiMessage {
+    text: String,
+    is_error: bool,
 }

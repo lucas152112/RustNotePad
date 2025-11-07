@@ -43,7 +43,8 @@ RustNotePad 需要在地化、主題管理與偏好設定三大子系統達到 N
 - `UserProfileStore` 存放 `locale=<code>` 以便下次啟動時套用。
 
 ### Tooling & Pipelines / 工具與流程
-- 新增 `scripts/dev/l10n-compile.rs` 檢查 JSON 結構、確保複數類別齊備（至少提供 `other`）。
+- 新增 `scripts/dev/l10n-compiler` 工具檢查 JSON 結構、確保複數類別齊備（至少提供 `other`）。
+  - 透過 `cargo run --manifest-path scripts/dev/l10n-compiler/Cargo.toml -- assets/langs --fail-on-missing` 在 CI/PR 中執行。
 - 建立 CI 工作在 PR 中驗證所有 `assets/langs/*.json`。
 
 ## Theme Management / 主題管理
@@ -55,7 +56,7 @@ RustNotePad 需要在地化、主題管理與偏好設定三大子系統達到 N
   2. TextMate `.tmTheme`。
   3. Sublime `.sublime-color-scheme` 與 `.sublime-syntax`（語法 / 配色）。
 - 匯入器將外部格式轉成統一的 `ThemeDefinition`（顏色、字型、語法 palette）。產生的 JSON 儲存於 `assets/themes/<slug>.json`。
-- `ThemeManager::load_from_dir` 讀取內建與使用者匯入的主題目錄（GUI 預設 `workspace/themes`，CLI 可指定路徑）。
+- `ThemeManager::load_from_dirs` 讀取內建與使用者匯入的主題目錄（GUI/CLI 預設載入 `assets/themes` + `<workspace>/.rustnotepad/themes`）。
 
 ### Syntax Highlight Integration / 語法高亮整合
 - 匯入 `.tmTheme` / `.sublime-syntax` 時，利用現有 `rustnotepad_highlight` 轉換成 `HighlightPalette`。
@@ -102,11 +103,11 @@ RustNotePad 需要在地化、主題管理與偏好設定三大子系統達到 N
 
 | Workflow | GUI | CLI | Notes |
 |----------|-----|-----|-------|
-| Theme import | 設定 → Style Configurator → 匯入 | `rustnotepad-cli themes import <file>` | 產生 JSON + 更新 `ThemeManager`. |
-| Theme export | 設定 → Style Configurator → 匯出 | `rustnotepad-cli themes export <name> --format tmTheme` | 支援 N++ XML、tmTheme。 |
+| Theme import | 設定 → Style Configurator → 匯入 | `rustnotepad-cli themes import <file>` | 支援 `.tmTheme`、Notepad++ XML、`.sublime-color-scheme`，並寫入 `<workspace>/.rustnotepad/themes`。 |
+| Theme export | 設定 → Style Configurator → 匯出 | `rustnotepad-cli themes export --name <theme> --output <file>` | 匯出統一 JSON 以供分享（後續再補 tmTheme/其他格式）。 |
 | Preferences import | 設定 → Preferences → 匯入 | `rustnotepad-cli preferences import <file>` | 驗證 schema，備份舊檔。 |
 | Preferences export | 設定 → Preferences → 匯出 | `rustnotepad-cli preferences export --output <file>` | 預設輸出到工作區根目錄。 |
-| Language pack install | 設定 → 語言 → 匯入 | `rustnotepad-cli localization install <file>` | 將 JSON 放入 `assets/langs` 或使用者專屬資料夾。 |
+| Language pack install | 設定 → 語言 → 匯入 | `rustnotepad-cli localization install <file>` | 將 JSON 放入 `<workspace>/.rustnotepad/langs`，下次啟動即可套用。 |
 
 所有匯入操作需提供復原點：
 - 匯入前備份原檔（`*.bak`）。

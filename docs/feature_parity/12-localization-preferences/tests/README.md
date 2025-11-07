@@ -15,6 +15,8 @@
   主題匯入/匯出交叉驗證
 - Preference sync between GUI and config files  
   GUI 與設定檔間的偏好同步
+- CLI smoke tests (`apps/cli/tests/settings.rs`) for localization/themes/preferences flows  
+  CLI 在地化／主題／偏好情境測試（`apps/cli/tests/settings.rs`）
 
 ## E2E scenarios / 端到端情境
 - Language installer workflow  

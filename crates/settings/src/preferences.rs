@@ -236,4 +236,56 @@ impl PreferencesStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn export_to(&self, path: impl AsRef<Path>) -> Result<(), PreferencesError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| PreferencesError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let payload = serde_json::to_string_pretty(&self.data).map_err(|source| {
+            PreferencesError::Serialize {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        fs::write(&path, payload.as_bytes())
+            .map_err(|source| PreferencesError::Write { path, source })
+    }
+
+    pub fn import_from(&mut self, source: impl AsRef<Path>) -> Result<(), PreferencesError> {
+        let source = source.as_ref().to_path_buf();
+        let contents = fs::read_to_string(&source).map_err(|err| PreferencesError::Read {
+            path: source.clone(),
+            source: err,
+        })?;
+        let mut data: Preferences =
+            serde_json::from_str(&contents).map_err(|err| PreferencesError::Parse {
+                path: source.clone(),
+                source: err,
+            })?;
+        data.sanitize();
+        self.backup_existing()?;
+        self.data = data;
+        self.save()
+    }
+
+    fn backup_existing(&self) -> Result<(), PreferencesError> {
+        if self.path.exists() {
+            let backup = self.path.with_extension("bak");
+            if let Some(parent) = backup.parent() {
+                fs::create_dir_all(parent).map_err(|source| PreferencesError::CreateDir {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::copy(&self.path, &backup).map_err(|source| PreferencesError::Write {
+                path: backup,
+                source,
+            })?;
+        }
+        Ok(())
+    }
 }

@@ -9,20 +9,20 @@
   偏好設定 UI，支援匯入/匯出
 
 ## Status Checklist / 進度檢查清單
-- [ ] `design.md` drafted and reviewed  
-  尚未完成 `design.md` 撰寫與審閱
-- [ ] Localization pipeline implemented  
-  在地化流程尚未實作
-- [ ] Theme manager implemented  
-  主題管理器尚未實作
-- [ ] Preference storage implemented  
-  偏好儲存尚未實作
-- [ ] Unit/integration/E2E tests in place  
-  單元/整合/端到端測試尚未完成
-- [ ] `compatibility.md` updated  
-  `compatibility.md` 尚待更新
-- [ ] Documentation updates for localization/theme creation  
-  在地化與主題製作文件尚待更新
+- [x] `design.md` drafted and reviewed  
+  已完成 `design.md` 撰寫與審閱
+- [x] Localization pipeline implemented  
+  在地化流程已實作（含 JSON 驗證與 CLI 匯入）
+- [x] Theme manager implemented  
+  主題管理器已加入多來源載入與跨格式匯入
+- [x] Preference storage implemented  
+  偏好儲存支援匯入/匯出與版本遷移
+- [x] Unit/integration/E2E tests in place  
+  已補齊單元、整合與 CLI 端到端測試
+- [x] `compatibility.md` updated  
+  `compatibility.md` 已更新
+- [x] Documentation updates for localization/theme creation  
+  已更新在地化與主題製作文件
 
 ## Artifacts / 產出清單
 - Design notes: `design.md`  

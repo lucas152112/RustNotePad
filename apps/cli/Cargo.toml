@@ -14,7 +14,9 @@ rustnotepad_core = { path = "../../crates/core" }
 rustnotepad_search = { path = "../../crates/search" }
 rustnotepad_plugin_admin = { path = "../../crates/plugin_admin" }
 rustnotepad_plugin_wasm = { path = "../../crates/plugin_wasm" }
+rustnotepad_settings = { path = "../../crates/settings" }
 walkdir = "2.5"
+serde_json = "1.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"

@@ -18,6 +18,7 @@ members = [
     "crates/plugin_admin",
     "crates/plugin_host",
     "apps/cli",
+    "scripts/dev/l10n-compiler",
     "rust_sandbox_test",
 ]
 resolver = "2"

@@ -1,11 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
+use std::io::{BufRead, Cursor};
 use std::path::{Path, PathBuf};
 
 use crate::json::{self, JsonValue};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use rustnotepad_highlight::{parse_highlight_palette, HighlightPalette, ThemeParseError};
-use serde_json::json;
+use serde_json::{json, Value as SerdeValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -43,10 +46,12 @@ pub struct ThemeDefinition {
     pub palette: ThemePalette,
     pub fonts: FontSettings,
     pub syntax: Option<HighlightPalette>,
+    syntax_source: Option<SerdeValue>,
 }
 
 impl ThemeDefinition {
     pub fn builtin_dark() -> Self {
+        let (syntax_palette, syntax_value) = builtin_dark_syntax();
         Self {
             name: "Midnight Indigo".into(),
             description: Some("A high contrast dark theme tuned for Rust editing".into()),
@@ -66,11 +71,13 @@ impl ThemeDefinition {
                 editor_family: "JetBrains Mono".into(),
                 editor_size: 15,
             },
-            syntax: Some(builtin_dark_syntax()),
+            syntax: Some(syntax_palette),
+            syntax_source: Some(syntax_value),
         }
     }
 
     pub fn builtin_light() -> Self {
+        let (syntax_palette, syntax_value) = builtin_light_syntax();
         Self {
             name: "Nordic Daylight".into(),
             description: Some("Soft light palette with subtle blues".into()),
@@ -90,7 +97,8 @@ impl ThemeDefinition {
                 editor_family: "Fira Code".into(),
                 editor_size: 15,
             },
-            syntax: Some(builtin_light_syntax()),
+            syntax: Some(syntax_palette),
+            syntax_source: Some(syntax_value),
         }
     }
 
@@ -136,9 +144,14 @@ impl ThemeDefinition {
             .ok_or(ThemeLoadError::MissingField("fonts"))?;
         let fonts = FontSettings::from_json(fonts_value)?;
 
-        let syntax = match map.get("syntax") {
-            Some(value) => Some(parse_syntax_palette(value)?),
-            None => None,
+        let (syntax, syntax_source) = match map.get("syntax") {
+            Some(value) => {
+                let serde_value = to_serde_value(value)?;
+                let palette =
+                    parse_highlight_palette(&serde_value).map_err(ThemeLoadError::from)?;
+                (Some(palette), Some(serde_value))
+            }
+            None => (None, None),
         };
 
         Ok(Self {
@@ -148,6 +161,7 @@ impl ThemeDefinition {
             palette,
             fonts,
             syntax,
+            syntax_source,
         })
     }
 
@@ -169,9 +183,9 @@ impl ThemeDefinition {
     }
 
     fn from_tmtheme_value(value: &TmValue, fallback_name: &str) -> Result<Self, ThemeLoadError> {
-        let dict = value
-            .as_dict()
-            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme root must be a dictionary"))?;
+        let dict = value.as_dict().ok_or_else(|| {
+            ThemeLoadError::InvalidFormat("tmTheme root must be a dictionary".to_string())
+        })?;
 
         let name = dict
             .get("name")
@@ -182,12 +196,16 @@ impl ThemeDefinition {
         let settings = dict
             .get("settings")
             .and_then(TmValue::as_array)
-            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme missing settings array"))?;
+            .ok_or_else(|| {
+                ThemeLoadError::InvalidFormat("tmTheme missing settings array".to_string())
+            })?;
 
         let general = settings
             .iter()
             .find_map(extract_general_settings)
-            .ok_or_else(|| ThemeLoadError::InvalidFormat("tmTheme missing base settings"))?;
+            .ok_or_else(|| {
+                ThemeLoadError::InvalidFormat("tmTheme missing base settings".to_string())
+            })?;
 
         let foreground = general
             .get("foreground")
@@ -231,10 +249,251 @@ impl ThemeDefinition {
                 editor_size: 15,
             },
             syntax: None,
+            syntax_source: None,
         };
 
         definition.validate()?;
         Ok(definition)
+    }
+}
+
+impl ThemeDefinition {
+    /// Imports a theme from a Notepad++ `stylers.xml` file.
+    /// 從 Notepad++ `stylers.xml` 檔案匯入主題。
+    pub fn from_notepad_xml(path: impl AsRef<Path>) -> Result<Self, ThemeLoadError> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)?;
+        let fallback = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Imported Notepad++ Theme");
+        Self::from_notepad_xml_contents(&contents, fallback)
+    }
+
+    fn from_notepad_xml_contents(
+        contents: &str,
+        fallback_name: &str,
+    ) -> Result<Self, ThemeLoadError> {
+        let mut reader = Reader::from_reader(Cursor::new(contents.as_bytes()));
+        reader.trim_text(true);
+        let mut buf = Vec::new();
+        let mut default_fg = None;
+        let mut default_bg = None;
+        let mut selection_bg = None;
+        let mut caret_color = None;
+        let mut root_name = None;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref element)) => {
+                    if element.name().as_ref().eq_ignore_ascii_case(b"WidgetStyle") {
+                        process_widget_style(
+                            &reader,
+                            element,
+                            &mut default_fg,
+                            &mut default_bg,
+                            &mut selection_bg,
+                            &mut caret_color,
+                        )?;
+                    } else if element.name().as_ref().eq_ignore_ascii_case(b"NotepadPlus") {
+                        if root_name.is_none() {
+                            root_name = attribute_value(&reader, element, &["name"])?;
+                        }
+                    }
+                }
+                Ok(Event::Empty(ref element)) => {
+                    if element.name().as_ref().eq_ignore_ascii_case(b"WidgetStyle") {
+                        process_widget_style(
+                            &reader,
+                            element,
+                            &mut default_fg,
+                            &mut default_bg,
+                            &mut selection_bg,
+                            &mut caret_color,
+                        )?;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(err) => {
+                    return Err(ThemeLoadError::InvalidFormat(format!(
+                        "Notepad++ theme parse error: {err}"
+                    )));
+                }
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        let background = default_bg.unwrap_or_else(|| "#1F1F1F".to_string());
+        let foreground = default_fg.unwrap_or_else(|| "#E5E7EB".to_string());
+        let selection = selection_bg.unwrap_or_else(|| "#2563EB".to_string());
+        let caret = caret_color.unwrap_or_else(|| "#93C5FD".to_string());
+
+        let palette = ThemePalette {
+            background: background.clone(),
+            panel: adjust_panel_color(&background),
+            accent: selection.clone(),
+            accent_text: foreground.clone(),
+            editor_background: background.clone(),
+            editor_text: foreground.clone(),
+            status_bar: caret.clone(),
+        };
+
+        let name = root_name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| fallback_name.to_string());
+
+        let definition = ThemeDefinition {
+            name,
+            description: Some("Imported from Notepad++ stylers.xml".to_string()),
+            kind: infer_kind_from_background(&palette.editor_background)?,
+            palette,
+            fonts: FontSettings {
+                ui_family: "Inter".into(),
+                ui_size: 16,
+                editor_family: "JetBrains Mono".into(),
+                editor_size: 15,
+            },
+            syntax: None,
+            syntax_source: None,
+        };
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    /// Imports a theme from a Sublime Text color scheme (`.sublime-color-scheme`).
+    /// 從 Sublime `.sublime-color-scheme` 匯入主題。
+    pub fn from_sublime_color_scheme(path: impl AsRef<Path>) -> Result<Self, ThemeLoadError> {
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path)?;
+        let fallback = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Imported Sublime Theme");
+        let value = parse_sublime_json(&contents)?;
+        Self::from_sublime_value(value, fallback)
+    }
+
+    fn from_sublime_value(value: SerdeValue, fallback_name: &str) -> Result<Self, ThemeLoadError> {
+        let mut variables = HashMap::new();
+        if let Some(map) = value.get("variables").and_then(|value| value.as_object()) {
+            for (key, entry) in map {
+                if let Some(text) = entry.as_str() {
+                    variables.insert(key.clone(), text.to_string());
+                }
+            }
+        }
+
+        let globals = value
+            .get("globals")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        let background = globals
+            .get("background")
+            .and_then(|entry| resolve_sublime_color(entry, &variables, 0))
+            .unwrap_or_else(|| "#1F1F1F".to_string());
+        let foreground = globals
+            .get("foreground")
+            .and_then(|entry| resolve_sublime_color(entry, &variables, 0))
+            .unwrap_or_else(|| "#E5E7EB".to_string());
+        let selection = globals
+            .get("selection")
+            .or_else(|| globals.get("highlight"))
+            .and_then(|entry| resolve_sublime_color(entry, &variables, 0))
+            .unwrap_or_else(|| "#2563EB".to_string());
+        let caret = globals
+            .get("caret")
+            .and_then(|entry| resolve_sublime_color(entry, &variables, 0))
+            .unwrap_or_else(|| "#93C5FD".to_string());
+
+        let syntax_value = value
+            .get("rules")
+            .and_then(|rules| rules.as_array())
+            .and_then(|rules| build_sublime_syntax_value(rules, &variables));
+        let syntax = match &syntax_value {
+            Some(json) => Some(parse_highlight_palette(json).map_err(ThemeLoadError::from)?),
+            None => None,
+        };
+
+        let description = value
+            .get("author")
+            .and_then(|v| v.as_str())
+            .map(|author| format!("Imported from Sublime color scheme by {author}"))
+            .or_else(|| Some("Imported from Sublime color scheme".to_string()));
+
+        let name = value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(fallback_name)
+            .to_string();
+
+        let palette = ThemePalette {
+            background: background.clone(),
+            panel: adjust_panel_color(&background),
+            accent: selection.clone(),
+            accent_text: foreground.clone(),
+            editor_background: background.clone(),
+            editor_text: foreground.clone(),
+            status_bar: caret.clone(),
+        };
+
+        let definition = ThemeDefinition {
+            name,
+            description,
+            kind: infer_kind_from_background(&palette.editor_background)?,
+            palette,
+            fonts: FontSettings {
+                ui_family: "Inter".into(),
+                ui_size: 16,
+                editor_family: "JetBrains Mono".into(),
+                editor_size: 15,
+            },
+            syntax,
+            syntax_source: syntax_value,
+        };
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    /// Generates a filesystem-friendly slug for this theme.
+    pub fn slug(&self) -> String {
+        Self::slug_for(&self.name)
+    }
+
+    /// Generates a slug for the provided theme name.
+    pub fn slug_for(name: &str) -> String {
+        slugify(name)
+    }
+
+    /// Converts the theme back to its JSON representation.
+    pub(crate) fn to_json_value(&self) -> JsonValue {
+        let mut map = BTreeMap::new();
+        map.insert("name".to_string(), JsonValue::String(self.name.clone()));
+        map.insert(
+            "description".to_string(),
+            self.description
+                .as_ref()
+                .map(|value| JsonValue::String(value.clone()))
+                .unwrap_or(JsonValue::Null),
+        );
+        map.insert(
+            "kind".to_string(),
+            JsonValue::String(self.kind.as_str().to_string()),
+        );
+        map.insert("palette".to_string(), self.palette.to_json());
+        map.insert("fonts".to_string(), self.fonts.to_json());
+        if let Some(value) = &self.syntax_source {
+            map.insert("syntax".to_string(), from_serde_value(value));
+        }
+        JsonValue::Object(map)
+    }
+
+    /// Serializes the theme into a formatted JSON string.
+    pub fn to_json_string(&self) -> String {
+        json::stringify_pretty(&self.to_json_value(), 2)
     }
 }
 
@@ -310,7 +569,7 @@ fn parse_tmtheme(input: &str) -> Result<TmValue, ThemeLoadError> {
     let value = parse_tm_value(&mut stream)?;
     if stream.peek().is_some() {
         return Err(ThemeLoadError::InvalidFormat(
-            "tmTheme parse error (unexpected trailing tokens)",
+            "tmTheme parse error (unexpected trailing tokens)".to_string(),
         ));
     }
     Ok(value)
@@ -335,7 +594,7 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
 
         if rest.starts_with("<?") {
             let end = rest.find("?>").ok_or(ThemeLoadError::InvalidFormat(
-                "tmTheme parse error (unterminated processing instruction)",
+                "tmTheme parse error (unterminated processing instruction)".to_string(),
             ))?;
             rest = &rest[end + 2..];
             continue;
@@ -343,7 +602,7 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
 
         if rest.starts_with("<!--") {
             let end = rest.find("-->").ok_or(ThemeLoadError::InvalidFormat(
-                "tmTheme parse error (unterminated comment)",
+                "tmTheme parse error (unterminated comment)".to_string(),
             ))?;
             rest = &rest[end + 3..];
             continue;
@@ -351,7 +610,7 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
 
         if rest.starts_with("</") {
             let end = rest.find('>').ok_or(ThemeLoadError::InvalidFormat(
-                "tmTheme parse error (unterminated closing tag)",
+                "tmTheme parse error (unterminated closing tag)".to_string(),
             ))?;
             let tag = &rest[2..end];
             match tag {
@@ -374,33 +633,37 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
             continue;
         }
         if rest.starts_with("<key>") {
-            let (value, remainder) = extract_tag_text(rest, "key").ok_or(
-                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <key>)"),
-            )?;
+            let (value, remainder) =
+                extract_tag_text(rest, "key").ok_or(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unterminated <key>)".to_string(),
+                ))?;
             tokens.push(TmToken::Key(value));
             rest = remainder;
             continue;
         }
         if rest.starts_with("<string>") {
-            let (value, remainder) = extract_tag_text(rest, "string").ok_or(
-                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <string>)"),
-            )?;
+            let (value, remainder) =
+                extract_tag_text(rest, "string").ok_or(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unterminated <string>)".to_string(),
+                ))?;
             tokens.push(TmToken::Text(value));
             rest = remainder;
             continue;
         }
         if rest.starts_with("<integer>") {
-            let (value, remainder) = extract_tag_text(rest, "integer").ok_or(
-                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <integer>)"),
-            )?;
+            let (value, remainder) =
+                extract_tag_text(rest, "integer").ok_or(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unterminated <integer>)".to_string(),
+                ))?;
             tokens.push(TmToken::Text(value));
             rest = remainder;
             continue;
         }
         if rest.starts_with("<real>") {
-            let (value, remainder) = extract_tag_text(rest, "real").ok_or(
-                ThemeLoadError::InvalidFormat("tmTheme parse error (unterminated <real>)"),
-            )?;
+            let (value, remainder) =
+                extract_tag_text(rest, "real").ok_or(ThemeLoadError::InvalidFormat(
+                    "tmTheme parse error (unterminated <real>)".to_string(),
+                ))?;
             tokens.push(TmToken::Text(value));
             rest = remainder;
             continue;
@@ -417,7 +680,7 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
         }
 
         let end = rest.find('>').ok_or(ThemeLoadError::InvalidFormat(
-            "tmTheme parse error (unterminated tag)",
+            "tmTheme parse error (unterminated tag)".to_string(),
         ))?;
         rest = &rest[end + 1..];
     }
@@ -428,7 +691,7 @@ fn tokenize_tmtheme(input: &str) -> Result<Vec<TmToken<'_>>, ThemeLoadError> {
 fn parse_tm_value(stream: &mut TokenStream<'_>) -> Result<TmValue, ThemeLoadError> {
     let Some(token) = stream.next() else {
         return Err(ThemeLoadError::InvalidFormat(
-            "tmTheme parse error (unexpected end of input)",
+            "tmTheme parse error (unexpected end of input)".to_string(),
         ));
     };
     match token {
@@ -436,7 +699,7 @@ fn parse_tm_value(stream: &mut TokenStream<'_>) -> Result<TmValue, ThemeLoadErro
         TmToken::StartArray => parse_tm_array(stream).map(TmValue::Array),
         TmToken::Text(text) => Ok(TmValue::String(text.to_string())),
         _ => Err(ThemeLoadError::InvalidFormat(
-            "tmTheme parse error (unexpected token)",
+            "tmTheme parse error (unexpected token)".to_string(),
         )),
     }
 }
@@ -459,12 +722,12 @@ fn parse_tm_dict(
             }
             None => {
                 return Err(ThemeLoadError::InvalidFormat(
-                    "tmTheme parse error (unexpected end of input)",
+                    "tmTheme parse error (unexpected end of input)".to_string(),
                 ))
             }
             _ => {
                 return Err(ThemeLoadError::InvalidFormat(
-                    "tmTheme parse error (expected key)",
+                    "tmTheme parse error (expected key)".to_string(),
                 ))
             }
         }
@@ -486,7 +749,7 @@ fn parse_tm_array(stream: &mut TokenStream<'_>) -> Result<Vec<TmValue>, ThemeLoa
             }
             None => {
                 return Err(ThemeLoadError::InvalidFormat(
-                    "tmTheme parse error (unexpected end of input)",
+                    "tmTheme parse error (unexpected end of input)".to_string(),
                 ))
             }
         }
@@ -504,33 +767,387 @@ fn extract_tag_text<'a>(input: &'a str, tag: &str) -> Option<(&'a str, &'a str)>
     Some((trimmed, remainder))
 }
 
-fn builtin_dark_syntax() -> HighlightPalette {
-    parse_highlight_palette(&json!({
+fn builtin_dark_syntax() -> (HighlightPalette, SerdeValue) {
+    let value = json!({
         "keyword": { "foreground": "#93C5FD", "bold": true },
         "string": { "foreground": "#FBBF24" },
         "comment": { "foreground": "#6B7280", "italic": true },
         "number": { "foreground": "#F97316" },
         "operator": { "foreground": "#A855F7" },
         "identifier": { "foreground": "#E5E7EB" }
-    }))
-    .expect("builtin syntax palette must be valid")
+    });
+    let palette = parse_highlight_palette(&value).expect("builtin syntax palette must be valid");
+    (palette, value)
 }
 
-fn builtin_light_syntax() -> HighlightPalette {
-    parse_highlight_palette(&json!({
+fn builtin_light_syntax() -> (HighlightPalette, SerdeValue) {
+    let value = json!({
         "keyword": { "foreground": "#1D4ED8", "bold": true },
         "string": { "foreground": "#B45309" },
         "comment": { "foreground": "#9CA3AF", "italic": true },
         "number": { "foreground": "#D97706" },
         "operator": { "foreground": "#6366F1" },
         "identifier": { "foreground": "#1F2937" }
-    }))
-    .expect("builtin syntax palette must be valid")
+    });
+    let palette = parse_highlight_palette(&value).expect("builtin syntax palette must be valid");
+    (palette, value)
 }
 
-fn parse_syntax_palette(value: &JsonValue) -> Result<HighlightPalette, ThemeLoadError> {
-    let serde_value = to_serde_value(value)?;
-    parse_highlight_palette(&serde_value).map_err(ThemeLoadError::from)
+fn process_widget_style<B: BufRead>(
+    reader: &Reader<B>,
+    element: &BytesStart<'_>,
+    default_fg: &mut Option<String>,
+    default_bg: &mut Option<String>,
+    selection_bg: &mut Option<String>,
+    caret_color: &mut Option<String>,
+) -> Result<(), ThemeLoadError> {
+    let name = attribute_value(reader, element, &["name"])?.unwrap_or_default();
+    let fg = attribute_value(reader, element, &["fgColor", "fgcolor"])?;
+    let bg = attribute_value(reader, element, &["bgColor", "bgcolor"])?;
+    if matches_notepad_name(&name, &["Default Style", "Default text"]) {
+        if default_fg.is_none() {
+            if let Some(value) = fg.as_deref().and_then(|text| normalize_hex_color(text)) {
+                *default_fg = Some(value);
+            }
+        }
+        if default_bg.is_none() {
+            if let Some(value) = bg.as_deref().and_then(|text| normalize_hex_color(text)) {
+                *default_bg = Some(value);
+            }
+        }
+    } else if matches_notepad_name(&name, &["Selected text colour", "Selected text color"]) {
+        if selection_bg.is_none() {
+            if let Some(value) = bg.as_deref().and_then(|text| normalize_hex_color(text)) {
+                *selection_bg = Some(value);
+            }
+        }
+    } else if matches_notepad_name(&name, &["Caret colour", "Caret color"]) {
+        if caret_color.is_none() {
+            if let Some(value) = fg
+                .as_deref()
+                .and_then(|text| normalize_hex_color(text))
+                .or_else(|| bg.as_deref().and_then(|text| normalize_hex_color(text)))
+            {
+                *caret_color = Some(value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn attribute_value<B: BufRead>(
+    reader: &Reader<B>,
+    element: &BytesStart<'_>,
+    keys: &[&str],
+) -> Result<Option<String>, ThemeLoadError> {
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|err| {
+            ThemeLoadError::InvalidFormat(format!("XML attribute parse error: {err}"))
+        })?;
+        for key in keys {
+            if attribute.key.as_ref().eq_ignore_ascii_case(key.as_bytes()) {
+                let value = attribute
+                    .decode_and_unescape_value(reader)
+                    .map_err(|err| {
+                        ThemeLoadError::InvalidFormat(format!("XML attribute decode error: {err}"))
+                    })?
+                    .into_owned();
+                return Ok(Some(value));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn matches_notepad_name(input: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| input.eq_ignore_ascii_case(candidate))
+}
+
+fn adjust_panel_color(base: &str) -> String {
+    if let Ok(color) = Color::from_hex(base) {
+        let average = (color.r as u32 + color.g as u32 + color.b as u32) / 3;
+        let delta: i16 = if average > 180 { -12 } else { 12 };
+        let adjust = |component: u8| -> u8 {
+            let value = component as i16 + delta;
+            value.clamp(0, 255) as u8
+        };
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            adjust(color.r),
+            adjust(color.g),
+            adjust(color.b)
+        )
+    } else {
+        base.to_string()
+    }
+}
+
+fn normalize_hex_color(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(color) = parse_rgb_function(trimmed) {
+        return Some(color);
+    }
+    let mut hex = trimmed
+        .trim_start_matches('#')
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .to_string();
+    if hex.len() == 3 {
+        let mut expanded = String::new();
+        for ch in hex.chars() {
+            expanded.push(ch);
+            expanded.push(ch);
+        }
+        hex = expanded;
+    }
+    if hex.len() != 6 && hex.len() != 8 {
+        return None;
+    }
+    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Some(format!("#{}", hex.to_uppercase()));
+    }
+    None
+}
+
+fn parse_rgb_function(input: &str) -> Option<String> {
+    let normalized = input.trim();
+    let (func, rest) = normalized.split_once('(')?;
+    let func = func.trim().to_ascii_lowercase();
+    if func != "rgb" && func != "rgba" {
+        return None;
+    }
+    let args = rest.strip_suffix(')')?;
+    let parts: Vec<_> = args.split(',').map(|part| part.trim()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let r = parse_rgb_component(parts[0])?;
+    let g = parse_rgb_component(parts[1])?;
+    let b = parse_rgb_component(parts[2])?;
+    let a = if func == "rgba" && parts.len() >= 4 {
+        parse_alpha_component(parts[3])?
+    } else {
+        255
+    };
+    if a == 255 {
+        Some(format!("#{:02X}{:02X}{:02X}", r, g, b))
+    } else {
+        Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
+    }
+}
+
+fn parse_rgb_component(value: &str) -> Option<u8> {
+    if value.ends_with('%') {
+        let perc = value[..value.len() - 1].trim().parse::<f32>().ok()?;
+        return Some((perc.clamp(0.0, 100.0) * 2.55).round() as u8);
+    }
+    let number = value.parse::<f32>().ok()?;
+    if number <= 1.0 {
+        Some((number.clamp(0.0, 1.0) * 255.0).round() as u8)
+    } else {
+        Some(number.clamp(0.0, 255.0).round() as u8)
+    }
+}
+
+fn parse_alpha_component(value: &str) -> Option<u8> {
+    if value.ends_with('%') {
+        let perc = value[..value.len() - 1].trim().parse::<f32>().ok()?;
+        return Some((perc.clamp(0.0, 100.0) * 2.55).round() as u8);
+    }
+    let number = value.parse::<f32>().ok()?;
+    if number <= 1.0 {
+        Some((number.clamp(0.0, 1.0) * 255.0).round() as u8)
+    } else {
+        Some(number.clamp(0.0, 255.0).round() as u8)
+    }
+}
+
+fn resolve_sublime_color(
+    value: &SerdeValue,
+    variables: &HashMap<String, String>,
+    depth: u8,
+) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+    match value {
+        SerdeValue::String(text) => {
+            let trimmed = text.trim();
+            if let Some(inner) = trimmed
+                .strip_prefix("var(")
+                .and_then(|rest| rest.strip_suffix(')'))
+            {
+                let key = inner.trim();
+                if let Some(variable) = variables.get(key) {
+                    return resolve_sublime_color(
+                        &SerdeValue::String(variable.clone()),
+                        variables,
+                        depth + 1,
+                    );
+                }
+            }
+            normalize_hex_color(trimmed)
+        }
+        _ => None,
+    }
+}
+
+fn build_sublime_syntax_value(
+    rules: &[SerdeValue],
+    variables: &HashMap<String, String>,
+) -> Option<SerdeValue> {
+    let mut map = serde_json::Map::new();
+    for rule in rules {
+        let obj = match rule.as_object() {
+            Some(obj) => obj,
+            None => continue,
+        };
+        let scope = match obj.get("scope").and_then(|value| value.as_str()) {
+            Some(scope) => scope,
+            None => continue,
+        };
+        let key = match classify_scope(scope) {
+            Some(key) => key,
+            None => continue,
+        };
+        if map.contains_key(key) {
+            continue;
+        }
+        let color = match obj
+            .get("foreground")
+            .and_then(|entry| resolve_sublime_color(entry, variables, 0))
+        {
+            Some(color) => color,
+            None => continue,
+        };
+        let mut entry = serde_json::Map::new();
+        entry.insert("foreground".to_string(), SerdeValue::String(color));
+        if let Some(style) = obj.get("font_style").and_then(|value| value.as_str()) {
+            let lower = style.to_ascii_lowercase();
+            if lower.contains("bold") {
+                entry.insert("bold".to_string(), SerdeValue::Bool(true));
+            }
+            if lower.contains("italic") {
+                entry.insert("italic".to_string(), SerdeValue::Bool(true));
+            }
+            if lower.contains("underline") {
+                entry.insert("underline".to_string(), SerdeValue::Bool(true));
+            }
+        }
+        map.insert(key.to_string(), SerdeValue::Object(entry));
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(SerdeValue::Object(map))
+    }
+}
+
+fn classify_scope(scope: &str) -> Option<&'static str> {
+    for raw in scope.split(|ch| ch == ',' || ch == ' ') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if lower.contains("keyword") {
+            return Some("keyword");
+        }
+        if lower.contains("string") {
+            return Some("string");
+        }
+        if lower.contains("comment") {
+            return Some("comment");
+        }
+        if lower.contains("constant.numeric") || lower.contains("number") {
+            return Some("number");
+        }
+        if lower.contains("punctuation") || lower.contains("operator") {
+            return Some("operator");
+        }
+        if lower.contains("variable") || lower.contains("entity.name") {
+            return Some("identifier");
+        }
+    }
+    None
+}
+
+fn slugify(input: &str) -> String {
+    let mut slug = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if ch.is_ascii_whitespace() || ch == '-' || ch == '_' {
+            if !slug.ends_with('-') && !slug.is_empty() {
+                slug.push('-');
+            }
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "theme".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn parse_sublime_json(input: &str) -> Result<SerdeValue, ThemeLoadError> {
+    let cleaned = strip_json_comments(input);
+    serde_json::from_str(&cleaned).map_err(|err| {
+        ThemeLoadError::InvalidFormat(format!("Sublime color scheme parse error: {err}"))
+    })
+}
+
+fn strip_json_comments(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            if !escape && ch == '"' {
+                in_string = false;
+            }
+            escape = !escape && ch == '\\';
+            output.push(ch);
+        } else {
+            match ch {
+                '"' => {
+                    in_string = true;
+                    output.push(ch);
+                }
+                '/' => match chars.peek() {
+                    Some('/') => {
+                        chars.next();
+                        while let Some(next) = chars.next() {
+                            if next == '\n' || next == '\r' {
+                                output.push('\n');
+                                break;
+                            }
+                        }
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut prev = '\0';
+                        while let Some(next) = chars.next() {
+                            if prev == '*' && next == '/' {
+                                break;
+                            }
+                            prev = next;
+                        }
+                    }
+                    _ => output.push('/'),
+                },
+                _ => output.push(ch),
+            }
+        }
+    }
+    output
 }
 
 fn extract_general_settings(entry: &TmValue) -> Option<&BTreeMap<String, TmValue>> {
@@ -592,6 +1209,33 @@ fn to_serde_value(value: &JsonValue) -> Result<serde_json::Value, ThemeLoadError
     })
 }
 
+fn from_serde_value(value: &SerdeValue) -> JsonValue {
+    match value {
+        SerdeValue::Null => JsonValue::Null,
+        SerdeValue::Bool(flag) => JsonValue::Bool(*flag),
+        SerdeValue::Number(num) => {
+            if let Some(val) = num.as_f64() {
+                JsonValue::Number(val)
+            } else if let Some(val) = num.as_i64() {
+                JsonValue::Number(val as f64)
+            } else if let Some(val) = num.as_u64() {
+                JsonValue::Number(val as f64)
+            } else {
+                JsonValue::Number(0.0)
+            }
+        }
+        SerdeValue::String(text) => JsonValue::String(text.clone()),
+        SerdeValue::Array(items) => JsonValue::Array(items.iter().map(from_serde_value).collect()),
+        SerdeValue::Object(map) => {
+            let mut object = BTreeMap::new();
+            for (key, item) in map {
+                object.insert(key.clone(), from_serde_value(item));
+            }
+            JsonValue::Object(object)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeKind {
     Dark,
@@ -604,6 +1248,13 @@ impl ThemeKind {
             "dark" => Ok(ThemeKind::Dark),
             "light" => Ok(ThemeKind::Light),
             other => Err(ThemeLoadError::InvalidKind(other.to_string())),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ThemeKind::Dark => "dark",
+            ThemeKind::Light => "light",
         }
     }
 }
@@ -632,6 +1283,33 @@ impl ThemePalette {
             status_bar: string_field(map, "status_bar")?,
         })
     }
+
+    fn to_json(&self) -> JsonValue {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "background".into(),
+            JsonValue::String(self.background.clone()),
+        );
+        map.insert("panel".into(), JsonValue::String(self.panel.clone()));
+        map.insert("accent".into(), JsonValue::String(self.accent.clone()));
+        map.insert(
+            "accent_text".into(),
+            JsonValue::String(self.accent_text.clone()),
+        );
+        map.insert(
+            "editor_background".into(),
+            JsonValue::String(self.editor_background.clone()),
+        );
+        map.insert(
+            "editor_text".into(),
+            JsonValue::String(self.editor_text.clone()),
+        );
+        map.insert(
+            "status_bar".into(),
+            JsonValue::String(self.status_bar.clone()),
+        );
+        JsonValue::Object(map)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +1329,24 @@ impl FontSettings {
             editor_family: string_field(map, "editor_family")?,
             editor_size: number_field(map, "editor_size")?,
         })
+    }
+
+    fn to_json(&self) -> JsonValue {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "ui_family".into(),
+            JsonValue::String(self.ui_family.clone()),
+        );
+        map.insert("ui_size".into(), JsonValue::Number(self.ui_size as f64));
+        map.insert(
+            "editor_family".into(),
+            JsonValue::String(self.editor_family.clone()),
+        );
+        map.insert(
+            "editor_size".into(),
+            JsonValue::Number(self.editor_size as f64),
+        );
+        JsonValue::Object(map)
     }
 }
 
@@ -688,30 +1384,21 @@ impl ThemeManager {
     }
 
     pub fn load_from_dir(path: impl AsRef<Path>) -> Result<Self, ThemeLoadError> {
-        let dir = path.as_ref();
-        let mut definitions = Vec::new();
-        if dir.is_dir() {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.eq_ignore_ascii_case("json"))
-                    .unwrap_or(false)
-                {
-                    let data = fs::read_to_string(&path)?;
-                    let json_value = json::parse(&data)?;
-                    let definition = ThemeDefinition::from_json(&json_value)?;
-                    definitions.push(definition);
-                }
-            }
-        }
+        Self::load_from_dirs(std::iter::once(path))
+    }
 
+    pub fn load_from_dirs<I, P>(paths: I) -> Result<Self, ThemeLoadError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut definitions = Vec::new();
+        for path in paths {
+            Self::collect_definitions(path.as_ref(), &mut definitions)?;
+        }
         if definitions.is_empty() {
             definitions = vec![Self::fallback_dark(), Self::fallback_light()];
         }
-
         Self::new(definitions)
     }
 
@@ -797,6 +1484,31 @@ impl ThemeManager {
         paths.sort();
         paths
     }
+
+    fn collect_definitions(
+        dir: &Path,
+        definitions: &mut Vec<ThemeDefinition>,
+    ) -> Result<(), ThemeLoadError> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("json"))
+                .unwrap_or(false)
+            {
+                let data = fs::read_to_string(&path)?;
+                let json_value = json::parse(&data)?;
+                let definition = ThemeDefinition::from_json(&json_value)?;
+                definitions.push(definition);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -811,7 +1523,7 @@ pub enum ThemeLoadError {
     InvalidField(&'static str),
     MissingField(&'static str),
     InvalidKind(String),
-    InvalidFormat(&'static str),
+    InvalidFormat(String),
     Empty,
     Syntax(ThemeParseError),
 }

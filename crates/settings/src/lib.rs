@@ -12,7 +12,9 @@ pub use associations::{FileAssociation, FileAssociations};
 pub use layout::{
     DockLayout, LayoutConfig, LayoutError, PaneLayout, PaneRole, TabColorTag, TabView,
 };
-pub use localization::{LocaleSummary, LocalizationError, LocalizationManager, LocalizationParams};
+pub use localization::{
+    LocaleCatalogStats, LocaleSummary, LocalizationError, LocalizationManager, LocalizationParams,
+};
 pub use preferences::{
     EditorPreferences, Preferences, PreferencesError, PreferencesStore, UiPreferences,
 };

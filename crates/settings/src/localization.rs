@@ -171,11 +171,29 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
         "settings.preferences.note",
         "Changes are saved automatically for the preview state.",
     ),
+    (
+        "settings.preferences.transfer_heading",
+        "Import / Export Preferences",
+    ),
+    (
+        "settings.preferences.transfer_hint",
+        "Relative paths are resolved against the current workspace.",
+    ),
+    ("settings.preferences.export_path", "Export to path"),
+    ("settings.preferences.import_path", "Import from path"),
+    ("settings.preferences.export_button", "Export"),
+    ("settings.preferences.import_button", "Import"),
     ("settings.style.heading", "Style Configurator"),
     ("settings.style.theme_label", "Available themes"),
     (
         "settings.style.note",
         "Select a theme to apply it immediately to the preview.",
+    ),
+    ("settings.style.import_heading", "Theme Import"),
+    ("settings.style.import_button", "Import Theme"),
+    (
+        "settings.style.import_hint",
+        "Supported formats: .tmTheme, .xml, .sublime-color-scheme. Imported themes are saved under workspace/.rustnotepad/themes.",
     ),
     ("settings.placeholder.heading", "Coming Soon"),
     (
@@ -323,6 +341,14 @@ pub enum LocalizationError {
 pub struct LocaleSummary {
     pub code: String,
     pub display_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocaleCatalogStats {
+    pub code: String,
+    pub display_name: String,
+    pub total_entries: usize,
+    pub plural_entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -482,6 +508,49 @@ impl LocalizationManager {
             .collect()
     }
 
+    /// Provides per-locale statistics useful for tooling.
+    /// （回傳語系統計資訊，供工具使用。）
+    pub fn catalog_stats(&self) -> Vec<LocaleCatalogStats> {
+        self.catalogs
+            .iter()
+            .map(|catalog| LocaleCatalogStats {
+                code: catalog.summary.code.clone(),
+                display_name: catalog.summary.display_name.clone(),
+                total_entries: catalog.messages.len(),
+                plural_entries: catalog
+                    .messages
+                    .values()
+                    .filter(|message| matches!(message, Message::Plural(_)))
+                    .count(),
+            })
+            .collect()
+    }
+
+    /// Returns missing keys for the provided locale relative to the fallback locale.
+    /// （比對預設語系，回傳指定語系缺少的鍵。）
+    pub fn missing_keys(&self, code: &str) -> Option<Vec<String>> {
+        let fallback_keys = {
+            let mut keys: Vec<_> = self.catalogs[self.fallback]
+                .messages
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let catalog = self
+            .catalogs
+            .iter()
+            .find(|catalog| catalog.summary.code == code)?;
+        let mut missing = Vec::new();
+        for key in fallback_keys {
+            if !catalog.messages.contains_key(&key) {
+                missing.push(key);
+            }
+        }
+        Some(missing)
+    }
+
     /// Switches the active locale by index.
     /// （依索引切換目前啟用的語系。）
     pub fn set_active_by_index(&mut self, index: usize) -> bool {
@@ -513,6 +582,12 @@ impl LocalizationManager {
         } else {
             Cow::Borrowed(key)
         }
+    }
+
+    /// Returns the locale code configured as fallback.
+    /// （回傳用作回退的語系代碼。）
+    pub fn fallback_code(&self) -> &str {
+        self.catalogs[self.fallback].summary.code.as_str()
     }
 }
 
