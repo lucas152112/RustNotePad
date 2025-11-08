@@ -1762,15 +1762,22 @@ impl RustNotePadApp {
             ));
         }
 
-        let mut localization = LocalizationManager::load_from_dir("assets/langs", "en-US")
-            .unwrap_or_else(|_| LocalizationManager::fallback());
-        if let Some(idx) = localization
-            .locale_summaries()
-            .iter()
-            .position(|summary| summary.code == current_preferences.ui.locale)
+        let user_lang_dir = workspace_root.join(".rustnotepad").join("langs");
+        if let Err(err) = fs::create_dir_all(&user_lang_dir) {
+            log_warn(format!(
+                "Failed to prepare user language directory {}: {err}",
+                user_lang_dir.display()
+            ));
+        }
+
+        let mut localization = LocalizationManager::load_from_dirs(
+            vec![PathBuf::from("assets/langs"), user_lang_dir.clone()],
+            "en-US",
+        )
+        .unwrap_or_else(|_| LocalizationManager::fallback());
+        if !localization.set_active_by_code(&current_preferences.ui.locale)
+            && current_preferences.ui.locale != "en-US"
         {
-            localization.set_active_by_index(idx);
-        } else if current_preferences.ui.locale != "en-US" {
             log_warn(format!(
                 "Unknown locale in preferences: {}",
                 current_preferences.ui.locale
@@ -6396,6 +6403,42 @@ mod tests {
             app.font_warning.is_some(),
             "expected a font warning when CJK font is unavailable"
         );
+    }
+
+    #[test]
+    fn user_installed_rtl_locale_is_loaded() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+
+        let temp_workspace = tempdir().expect("temp workspace");
+        let user_lang_dir = temp_workspace.path().join(".rustnotepad/langs");
+        fs::create_dir_all(&user_lang_dir).expect("create langs dir");
+        fs::write(
+            user_lang_dir.join("ar-SA.json"),
+            r#"
+            {
+                "locale": "ar-SA",
+                "display_name": "Arabic (Saudi Arabia)",
+                "strings": {
+                    "menu.file": "ملف"
+                }
+            }
+            "#,
+        )
+        .expect("write rtl locale");
+
+        let mut app = RustNotePadApp::new_with_workspace_root(temp_workspace.path().to_path_buf());
+        app.cjk_font_available = true;
+        let summaries = app.localization.locale_summaries();
+        let ar_index = summaries
+            .iter()
+            .enumerate()
+            .find_map(|(idx, summary)| (summary.code == "ar-SA").then_some(idx))
+            .expect("ar-SA locale available");
+        app.apply_locale_change(ar_index, &summaries);
+        assert_eq!(app.localization.active_code(), "ar-SA");
+        assert_eq!(app.text("menu.file"), "ملف");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use rustnotepad_settings::{Preferences, PreferencesStore};
+use std::fs;
 use tempfile::tempdir;
 
 #[test]
@@ -50,4 +51,46 @@ fn overwrite_replaces_existing_values() {
     assert_eq!(current.editor.autosave_interval_minutes, 5);
     assert!(!current.editor.show_line_numbers);
     assert_eq!(current.ui.theme, "Midnight Indigo");
+}
+
+#[test]
+fn legacy_version_is_upgraded_on_load() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("preferences.json");
+    fs::write(
+        &path,
+        r#"{
+            "version": 0,
+            "editor": {
+                "autosave_enabled": false,
+                "autosave_interval_minutes": 0,
+                "show_line_numbers": false,
+                "highlight_active_line": false
+            },
+            "ui": {
+                "locale": "zh-TW",
+                "theme": ""
+            }
+        }"#,
+    )
+    .expect("write legacy prefs");
+
+    let store = PreferencesStore::load(&path).expect("load legacy file");
+    let prefs = store.preferences();
+    assert_eq!(
+        prefs.version, 1,
+        "legacy preferences should be upgraded to schema version 1"
+    );
+    assert_eq!(
+        prefs.editor.autosave_interval_minutes, 5,
+        "autosave interval should fall back to default when legacy data is zero"
+    );
+    assert_eq!(
+        prefs.ui.theme, "Midnight Indigo",
+        "empty theme should fall back to default"
+    );
+    assert_eq!(
+        prefs.ui.locale, "zh-TW",
+        "specified locale should be preserved during migration"
+    );
 }

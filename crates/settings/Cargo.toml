@@ -11,6 +11,8 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = { workspace = true }
 quick-xml = { version = "0.31", features = ["encoding"] }
+icu_locid = "1.5"
+icu_plurals = { version = "1.5", features = ["compiled_data"] }
 
 [dev-dependencies]
 tempfile = "3.10"

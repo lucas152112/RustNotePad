@@ -33,3 +33,5 @@
   在地化快照測試
 - GUI automation for preference dialogs  
   偏好對話框的 GUI 自動化
+- `cargo run --manifest-path scripts/dev/l10n-compiler/Cargo.toml -- --reference docs/feature_parity/12-localization-preferences/reference/notepadpp_en_reference.json --fail-on-missing`  
+  使用 Notepad++ 參考鍵清單驗證在地化覆蓋率

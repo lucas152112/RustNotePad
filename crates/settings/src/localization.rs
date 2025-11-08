@@ -1,9 +1,13 @@
+use icu_locid::{Locale, ParserError as LocaleParserError};
+use icu_plurals::{PluralCategory as IcuPluralCategory, PluralOperands, PluralRules};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 
 const DEFAULT_LOCALE_CODE: &str = "en-US";
@@ -230,15 +234,32 @@ impl PluralCategory {
     }
 }
 
+impl From<IcuPluralCategory> for PluralCategory {
+    fn from(value: IcuPluralCategory) -> Self {
+        match value {
+            IcuPluralCategory::Zero => PluralCategory::Zero,
+            IcuPluralCategory::One => PluralCategory::One,
+            IcuPluralCategory::Two => PluralCategory::Two,
+            IcuPluralCategory::Few => PluralCategory::Few,
+            IcuPluralCategory::Many => PluralCategory::Many,
+            IcuPluralCategory::Other => PluralCategory::Other,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PluralMessage {
     forms: BTreeMap<PluralCategory, String>,
 }
 
 impl PluralMessage {
-    fn template_for<'a>(&'a self, language: &str, count: Option<u64>) -> &'a str {
+    fn template_for<'a>(
+        &'a self,
+        plural_rules: Option<&PluralRules>,
+        count: Option<u64>,
+    ) -> &'a str {
         let category = count
-            .map(|value| select_plural_category(language, value))
+            .map(|value| select_plural_category(plural_rules, value))
             .unwrap_or(PluralCategory::Other);
         self.forms
             .get(&category)
@@ -255,11 +276,15 @@ enum Message {
 }
 
 impl Message {
-    fn render<'a>(&'a self, language: &str, params: &LocalizationParams<'_>) -> Cow<'a, str> {
+    fn render<'a>(
+        &'a self,
+        plural_rules: Option<&PluralRules>,
+        params: &LocalizationParams<'_>,
+    ) -> Cow<'a, str> {
         match self {
             Message::Simple(text) => render_template(text, params),
             Message::Plural(plural) => {
-                render_template(plural.template_for(language, params.count), params)
+                render_template(plural.template_for(plural_rules, params.count), params)
             }
         }
     }
@@ -335,6 +360,11 @@ pub enum LocalizationError {
         key: String,
         kind: String,
     },
+    #[error("locale identifier '{locale}' is invalid: {error}")]
+    InvalidLocaleIdentifier {
+        locale: String,
+        error: LocaleParserError,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -354,7 +384,7 @@ pub struct LocaleCatalogStats {
 #[derive(Debug, Clone)]
 struct LocaleCatalog {
     summary: LocaleSummary,
-    language: String,
+    plural_rules: Option<Arc<PluralRules>>,
     messages: HashMap<String, Message>,
 }
 
@@ -407,83 +437,24 @@ impl LocalizationManager {
         path: impl AsRef<Path>,
         default_locale: &str,
     ) -> Result<Self, LocalizationError> {
+        Self::load_from_dirs(std::iter::once(path), default_locale)
+    }
+
+    /// Loads locale definitions from multiple directories in order.
+    /// （依序從多個目錄載入語系定義。）
+    pub fn load_from_dirs<I, P>(
+        paths: I,
+        default_locale: &str,
+    ) -> Result<Self, LocalizationError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
         let mut manager = Self::fallback();
-        let dir = path.as_ref();
-
-        match fs::read_dir(dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry =
-                        entry.map_err(|err| LocalizationError::ReadDir(dir.to_path_buf(), err))?;
-                    let path = entry.path();
-                    let metadata = entry
-                        .metadata()
-                        .map_err(|err| LocalizationError::ReadFile(path.clone(), err))?;
-                    if !metadata.is_file() {
-                        continue;
-                    }
-                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                        continue;
-                    }
-
-                    let contents = fs::read_to_string(&path)
-                        .map_err(|err| LocalizationError::ReadFile(path.clone(), err))?;
-                    let file: LocaleFile = serde_json::from_str(&contents)
-                        .map_err(|err| LocalizationError::ParseFile(path.clone(), err))?;
-                    let display_name = file
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| file.locale.clone());
-
-                    let language = language_tag(&file.locale);
-                    let messages = build_messages(&file.locale, file.strings)?;
-
-                    if file.locale == manager.catalogs[manager.fallback].summary.code {
-                        let mut merged = default_strings_map();
-                        merged.extend(messages.into_iter());
-                        manager.catalogs[manager.fallback] = LocaleCatalog {
-                            summary: LocaleSummary {
-                                code: file.locale,
-                                display_name,
-                            },
-                            language,
-                            messages: merged,
-                        };
-                    } else {
-                        if manager
-                            .catalogs
-                            .iter()
-                            .any(|catalog| catalog.summary.code == file.locale)
-                        {
-                            return Err(LocalizationError::DuplicateLocale(file.locale));
-                        }
-                        manager.catalogs.push(LocaleCatalog {
-                            summary: LocaleSummary {
-                                code: file.locale,
-                                display_name,
-                            },
-                            language,
-                            messages,
-                        });
-                    }
-                }
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                // Directory missing is acceptable; fallback catalog already loaded.
-            }
-            Err(err) => return Err(LocalizationError::ReadDir(dir.to_path_buf(), err)),
+        for path in paths {
+            manager.load_directory(path.as_ref())?;
         }
-
-        // Ensure fallback points to the requested default locale.
-        if let Some(idx) = manager
-            .catalogs
-            .iter()
-            .position(|catalog| catalog.summary.code == default_locale)
-        {
-            manager.fallback = idx;
-        }
-        manager.active = manager.fallback;
-
+        manager.apply_default_locale(default_locale);
         Ok(manager)
     }
 
@@ -562,6 +533,21 @@ impl LocalizationManager {
         }
     }
 
+    /// Switches the active locale by locale code.
+    /// （依語系代碼切換目前啟用的語系。）
+    pub fn set_active_by_code(&mut self, code: &str) -> bool {
+        if let Some(index) = self
+            .catalogs
+            .iter()
+            .position(|catalog| catalog.summary.code == code)
+        {
+            self.active = index;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Retrieves a localized string, falling back to English when missing.
     /// （取得指定鍵的在地化字串，若缺少則回退至英文。）
     pub fn text<'a>(&'a self, key: &'a str) -> Cow<'a, str> {
@@ -576,9 +562,11 @@ impl LocalizationManager {
         params: &LocalizationParams<'_>,
     ) -> Cow<'a, str> {
         if let Some(message) = self.catalogs[self.active].messages.get(key) {
-            message.render(self.catalogs[self.active].language.as_str(), params)
+            let rules = self.catalogs[self.active].plural_rules.as_deref();
+            message.render(rules, params)
         } else if let Some(message) = self.catalogs[self.fallback].messages.get(key) {
-            message.render(self.catalogs[self.fallback].language.as_str(), params)
+            let rules = self.catalogs[self.fallback].plural_rules.as_deref();
+            message.render(rules, params)
         } else {
             Cow::Borrowed(key)
         }
@@ -589,15 +577,106 @@ impl LocalizationManager {
     pub fn fallback_code(&self) -> &str {
         self.catalogs[self.fallback].summary.code.as_str()
     }
+
+    /// Returns true if the specified locale provides the given key.
+    /// （檢查指定語系是否存在特定鍵。）
+    pub fn locale_has_key(&self, code: &str, key: &str) -> bool {
+        self.catalogs
+            .iter()
+            .find(|catalog| catalog.summary.code == code)
+            .and_then(|catalog| catalog.messages.get(key))
+            .is_some()
+    }
+
+    fn load_directory(&mut self, dir: &Path) -> Result<(), LocalizationError> {
+        match fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry =
+                        entry.map_err(|err| LocalizationError::ReadDir(dir.to_path_buf(), err))?;
+                    let path = entry.path();
+                    let metadata = entry
+                        .metadata()
+                        .map_err(|err| LocalizationError::ReadFile(path.clone(), err))?;
+                    if !metadata.is_file() {
+                        continue;
+                    }
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                        continue;
+                    }
+
+                    let contents = fs::read_to_string(&path)
+                        .map_err(|err| LocalizationError::ReadFile(path.clone(), err))?;
+                    let file: LocaleFile = serde_json::from_str(&contents)
+                        .map_err(|err| LocalizationError::ParseFile(path.clone(), err))?;
+                    let display_name = file
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| file.locale.clone());
+
+                    let messages = build_messages(&file.locale, file.strings)?;
+                    let plural_rules = plural_rules_for(&file.locale)?;
+
+                    if file.locale == self.catalogs[self.fallback].summary.code {
+                        let mut merged = default_strings_map();
+                        merged.extend(messages.into_iter());
+                        self.catalogs[self.fallback] = LocaleCatalog {
+                            summary: LocaleSummary {
+                                code: file.locale,
+                                display_name,
+                            },
+                            plural_rules,
+                            messages: merged,
+                        };
+                    } else {
+                        if self
+                            .catalogs
+                            .iter()
+                            .any(|catalog| catalog.summary.code == file.locale)
+                        {
+                            return Err(LocalizationError::DuplicateLocale(file.locale));
+                        }
+                        self.catalogs.push(LocaleCatalog {
+                            summary: LocaleSummary {
+                                code: file.locale,
+                                display_name,
+                            },
+                            plural_rules,
+                            messages,
+                        });
+                    }
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // Directory missing is acceptable; fallback catalog already loaded.
+            }
+            Err(err) => return Err(LocalizationError::ReadDir(dir.to_path_buf(), err)),
+        }
+        Ok(())
+    }
+
+    fn apply_default_locale(&mut self, default_locale: &str) {
+        if let Some(idx) = self
+            .catalogs
+            .iter()
+            .position(|catalog| catalog.summary.code == default_locale)
+        {
+            self.fallback = idx;
+        }
+        self.active = self.fallback;
+    }
 }
 
 fn default_catalog() -> LocaleCatalog {
+    let plural_rules = plural_rules_for(DEFAULT_LOCALE_CODE)
+        .ok()
+        .flatten();
     LocaleCatalog {
         summary: LocaleSummary {
             code: DEFAULT_LOCALE_CODE.to_string(),
             display_name: DEFAULT_DISPLAY_NAME.to_string(),
         },
-        language: language_tag(DEFAULT_LOCALE_CODE),
+        plural_rules,
         messages: default_strings_map(),
     }
 }
@@ -608,6 +687,18 @@ fn default_strings_map() -> HashMap<String, Message> {
         map.insert((*key).to_string(), Message::Simple((*value).to_string()));
     }
     map
+}
+
+fn plural_rules_for(locale: &str) -> Result<Option<Arc<PluralRules>>, LocalizationError> {
+    let parsed =
+        Locale::from_str(locale).map_err(|error| LocalizationError::InvalidLocaleIdentifier {
+            locale: locale.to_string(),
+            error,
+        })?;
+    match PluralRules::try_new_cardinal(&parsed.into()) {
+        Ok(rules) => Ok(Some(Arc::new(rules))),
+        Err(_) => Ok(None),
+    }
 }
 
 fn build_messages(
@@ -675,82 +766,15 @@ fn render_template<'a>(template: &'a str, params: &LocalizationParams<'_>) -> Co
     current
 }
 
-fn language_tag(locale: &str) -> String {
-    locale
-        .split(|ch| ch == '-' || ch == '_')
-        .next()
-        .unwrap_or(locale)
-        .to_ascii_lowercase()
-}
-
-fn select_plural_category(language: &str, count: u64) -> PluralCategory {
-    match language {
-        // Languages without plural distinctions.
-        "ja" | "ko" | "zh" | "th" | "lo" | "ms" | "id" | "vi" => PluralCategory::Other,
-        // French-like rules (0 and 1 => one).
-        "fr" | "ff" | "kab" => {
-            if count == 0 || count == 1 {
-                PluralCategory::One
-            } else {
-                PluralCategory::Other
-            }
+fn select_plural_category(rules: Option<&PluralRules>, count: u64) -> PluralCategory {
+    if let Some(rules) = rules {
+        if let Ok(operands) = PluralOperands::from_str(&count.to_string()) {
+            return PluralCategory::from(rules.category_for(operands));
         }
-        // Russian / Ukrainian / Belarusian / Serbo-Croatian rules.
-        "ru" | "uk" | "be" | "bs" | "hr" | "sr" => {
-            let mod10 = count % 10;
-            let mod100 = count % 100;
-            if mod10 == 1 && mod100 != 11 {
-                PluralCategory::One
-            } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
-                PluralCategory::Few
-            } else if mod10 == 0 || (5..=9).contains(&mod10) || (11..=14).contains(&mod100) {
-                PluralCategory::Many
-            } else {
-                PluralCategory::Other
-            }
-        }
-        // Polish rules.
-        "pl" => {
-            let mod10 = count % 10;
-            let mod100 = count % 100;
-            if mod10 == 1 && mod100 != 11 {
-                PluralCategory::One
-            } else if (2..=4).contains(&mod10) && !(12..=14).contains(&mod100) {
-                PluralCategory::Few
-            } else {
-                PluralCategory::Many
-            }
-        }
-        // Czech and Slovak.
-        "cs" | "sk" => {
-            if count == 1 {
-                PluralCategory::One
-            } else if (2..=4).contains(&count) {
-                PluralCategory::Few
-            } else {
-                PluralCategory::Other
-            }
-        }
-        // Slovenian.
-        "sl" => {
-            let mod100 = count % 100;
-            if mod100 == 1 {
-                PluralCategory::One
-            } else if mod100 == 2 {
-                PluralCategory::Two
-            } else if (3..=4).contains(&mod100) {
-                PluralCategory::Few
-            } else {
-                PluralCategory::Other
-            }
-        }
-        // Default: English-style cardinal rules.
-        _ => {
-            if count == 1 {
-                PluralCategory::One
-            } else {
-                PluralCategory::Other
-            }
-        }
+    }
+    if count == 1 {
+        PluralCategory::One
+    } else {
+        PluralCategory::Other
     }
 }

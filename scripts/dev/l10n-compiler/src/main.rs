@@ -1,8 +1,10 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rustnotepad_settings::LocalizationManager;
+use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -20,6 +22,9 @@ struct Args {
     /// 遇到缺少鍵時使程序失敗。 / Fail when locales are missing keys relative to fallback.
     #[arg(long)]
     fail_on_missing: bool,
+    /// 比對參考鍵清單確保覆蓋率。 / Optional reference key list to compare against.
+    #[arg(long, value_name = "FILE")]
+    reference: Option<PathBuf>,
 }
 
 fn main() {
@@ -81,5 +86,60 @@ fn run() -> Result<()> {
         }
     }
 
+    if let Some(reference) = args.reference.as_ref() {
+        verify_reference_keys(&manager, reference)?;
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ReferenceSpec {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    locale: Option<String>,
+    keys: Vec<String>,
+}
+
+fn verify_reference_keys(manager: &LocalizationManager, path: &Path) -> Result<()> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("read localization reference {}", path.display()))?;
+    let spec: ReferenceSpec = serde_json::from_str(&contents)
+        .with_context(|| format!("parse reference {}", path.display()))?;
+    let locale = spec
+        .locale
+        .unwrap_or_else(|| manager.fallback_code().to_string());
+    let mut missing = Vec::new();
+    for key in spec.keys.iter() {
+        if !manager.locale_has_key(&locale, key) {
+            missing.push(key.clone());
+        }
+    }
+    if missing.is_empty() {
+        if let Some(source) = spec.source {
+            println!(
+                "Reference coverage OK for locale '{}' against {} ({} keys)",
+                locale,
+                source,
+                spec.keys.len()
+            );
+        } else {
+            println!(
+                "Reference coverage OK for locale '{}' ({} keys)",
+                locale,
+                spec.keys.len()
+            );
+        }
+        return Ok(());
+    }
+    eprintln!(
+        "Localization reference check failed for locale '{}'; missing {} key(s)",
+        locale,
+        missing.len()
+    );
+    for key in missing.iter() {
+        eprintln!("  · {key}");
+    }
+    bail!("reference coverage mismatch detected");
 }

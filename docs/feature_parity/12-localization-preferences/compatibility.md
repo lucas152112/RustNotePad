@@ -7,11 +7,11 @@
   Localization installs are workspace-scoped (`.rustnotepad/langs`) instead of a global shared folder.
 
 ## Validation checklist / 驗證檢查清單
-- [ ] Localization coverage compared against Notepad++ language packs  
-  與 Notepad++ 語言包的覆蓋率比較尚未完成
+- [x] Localization coverage compared against Notepad++ language packs  
+  透過 `cargo run --manifest-path scripts/dev/l10n-compiler/Cargo.toml -- --reference docs/feature_parity/12-localization-preferences/reference/notepadpp_en_reference.json --fail-on-missing` 驗證，參考鍵清單取自 Notepad++ v8.8.6 `english_customizable.xml`。
 - [x] Theme import/export compatibility verified  
   主題匯入/匯出的 CLI/GUI 驗證已完成（tmTheme/XML/Sublime 轉換與匯出流程）
-- [ ] Preference migration between releases tested  
-  版本間偏好設定遷移尚未測試
-- [ ] RTL and CJK UI layouts validated  
-  RTL 與 CJK 介面配置尚未驗證
+- [x] Preference migration between releases tested  
+  `crates/settings/tests/preferences_store.rs:40` 覆蓋 legacy `version=0` 偏好檔載入與欄位補強流程。
+- [x] RTL and CJK UI layouts validated  
+  `rustnotepad_gui/src/main.rs:6346`、`:6366`、`:6400` 的自動化測試涵蓋 zh-TW/CJK 字型流程與使用者自訂 `ar-SA` 語系的 RTL 切換。

@@ -163,3 +163,77 @@ fn missing_keys_reports_differences() {
     let missing = manager.missing_keys("fr").expect("locale present");
     assert!(missing.iter().any(|key| key == "menu.edit"));
 }
+
+#[test]
+fn set_active_by_code_switches_locale() {
+    let temp = tempdir().expect("tempdir");
+    let path = temp.path().join("fr-FR.json");
+    fs::write(
+        &path,
+        r#"
+        {
+            "locale": "fr-FR",
+            "strings": {
+                "menu.file": "Fichier"
+            }
+        }
+        "#,
+    )
+    .expect("write locale");
+
+    let mut manager = LocalizationManager::load_from_dir(temp.path(), "en-US").expect("load");
+    assert!(manager.set_active_by_code("fr-FR"));
+    assert_eq!(manager.active_code(), "fr-FR");
+    assert_eq!(manager.text("menu.file"), "Fichier");
+}
+
+#[test]
+fn load_from_dirs_merges_multiple_sources() {
+    let dir_a = tempdir().expect("dir a");
+    let dir_b = tempdir().expect("dir b");
+
+    fs::write(
+        dir_a.path().join("fr-FR.json"),
+        r#"
+        {
+            "locale": "fr-FR",
+            "strings": {
+                "menu.file": "Fichier"
+            }
+        }
+        "#,
+    )
+    .expect("write fr locale");
+
+    fs::write(
+        dir_b.path().join("ja-JP.json"),
+        r#"
+        {
+            "locale": "ja-JP",
+            "strings": {
+                "menu.file": "ファイル"
+            }
+        }
+        "#,
+    )
+    .expect("write ja locale");
+
+    let manager = LocalizationManager::load_from_dirs(
+        vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
+        "en-US",
+    )
+    .expect("load");
+    let summaries = manager.locale_summaries();
+    let codes: Vec<_> = summaries
+        .iter()
+        .map(|summary| summary.code.as_str())
+        .collect();
+    assert!(
+        codes.iter().any(|code| *code == "fr-FR"),
+        "expected fr-FR locale in merged manager, got {codes:?}"
+    );
+    assert!(
+        codes.iter().any(|code| *code == "ja-JP"),
+        "expected ja-JP locale in merged manager, got {codes:?}"
+    );
+}
