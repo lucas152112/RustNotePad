@@ -14,6 +14,7 @@
 ## 2025-11-04
 
 ### 完成 / Completed
+- 完成 Feature 3.12 的 GUI 菜單啟用：檢視/編碼/語言/工具/外掛/視窗/說明皆可呼叫對應指令，並在通知面板顯示結果；同時新增跨平臺打包腳本 `scripts/package-platform-binaries.sh`。 / Finished enabling all Feature 3.12 GUI menus (View/Encoding/Language/Tools/Plugins/Window/Help) with executable commands and notification feedback, plus added the multi-platform packaging script `scripts/package-platform-binaries.sh`.
 - 建立 `rustnotepad_plugin_admin` crate，提供外掛安裝、更新、移除的後端流程（WASM 與 DLL） / Added the `rustnotepad_plugin_admin` crate with install/update/remove backends for both WASM and DLL plugins.
 - 在 Windows 版本連結外掛指令按鈕，透過 `WindowsMessage` 轉送 `WM_COMMAND` 以觸發 DLL 回呼 / Wired Windows command buttons to dispatch `WM_COMMAND` via `WindowsMessage`, invoking DLL callbacks.
 - 完成 Feature 3.12 Localization/Theme/Preferences 初步實作：新增複數規則與參數化字串、TMTheme 匯入流程、偏好設定 JSON 儲存；同步新增對應測試與 GUI 整合。 / Delivered the first Feature 3.12 localization/theme/preferences milestone: plural-aware localization, TextMate theme import, JSON-backed preferences store, and associated tests plus GUI integration.

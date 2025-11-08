@@ -55,6 +55,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write as IoWrite};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -79,6 +80,7 @@ const PREVIEW_LANGUAGE_ID: &str = "rust";
 const MAX_MACRO_MESSAGES: usize = 10;
 const MAX_RUN_HISTORY: usize = 6;
 const MAX_EDITOR_HISTORY: usize = 128;
+const MAX_NOTIFICATION_MESSAGES: usize = 8;
 
 static MACRO_COMMAND_OPTIONS: &[(&str, &str, &str)] = &[
     (
@@ -1550,6 +1552,11 @@ impl StatusBarState {
     fn set_document_language(&mut self, language: String) {
         self.document_language = language;
     }
+
+    fn set_encoding(&mut self, encoding: &'static str) {
+        self.encoding = encoding;
+    }
+
 }
 
 struct RustNotePadApp {
@@ -1632,6 +1639,14 @@ struct RustNotePadApp {
     plugin_win_install_path: String,
     plugin_win_install_overwrite: bool,
     plugin_pending_removal: Option<PluginIdentifier>,
+    view_fullscreen: bool,
+    project_panel_visible: bool,
+    function_list_visible: bool,
+    document_map_visible: bool,
+    notification_log: VecDeque<String>,
+    show_help_manual_window: bool,
+    show_help_debug_window: bool,
+    show_help_about_window: bool,
     #[cfg(target_os = "windows")]
     windows_handles: WindowsSessionHandles,
 }
@@ -2015,6 +2030,14 @@ impl RustNotePadApp {
             plugin_win_install_path: String::new(),
             plugin_win_install_overwrite: false,
             plugin_pending_removal: None,
+            view_fullscreen: false,
+            project_panel_visible: true,
+            function_list_visible: true,
+            document_map_visible: true,
+            notification_log: VecDeque::new(),
+            show_help_manual_window: false,
+            show_help_debug_window: false,
+            show_help_about_window: false,
             #[cfg(target_os = "windows")]
             windows_handles,
         };
@@ -2710,6 +2733,74 @@ impl RustNotePadApp {
         }
     }
 
+    fn render_help_windows(&mut self, ctx: &egui::Context) {
+        if self.show_help_manual_window {
+            let mut open = self.show_help_manual_window;
+            egui::Window::new(self.text("menu.help.user_manual").to_string())
+                .open(&mut open)
+                .resizable(true)
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    ui.label(self.localized(
+                        "Refer to docs/AGENT_EN.md and the feature-parity notes for full instructions.\
+ Use Preferences → Localization to switch UI languages.",
+                        "請參考 docs/AGENT_EN.md 與功能對照文件取得完整指引；可至「偏好設定 → 語言」切換介面語系。",
+                    ));
+                    ui.separator();
+                    ui.monospace("docs/AGENT.md\nREADME.md");
+                });
+            self.show_help_manual_window = open;
+        }
+
+        if self.show_help_debug_window {
+            let mut open = self.show_help_debug_window;
+            egui::Window::new(self.text("menu.help.debug_info").to_string())
+                .open(&mut open)
+                .resizable(true)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label(self.localized("Runtime diagnostics", "執行期診斷資訊"));
+                    ui.separator();
+                    ui.monospace(format!(
+                        "Workspace : {}\nActive Doc : {}\nEncoding   : {}\nUI Locale : {}\nDoc Lang  : {}\nTheme     : {}",
+                        self.workspace_root.display(),
+                        self.current_document_id,
+                        self.status.encoding,
+                        self.status.ui_language,
+                        self.status.document_language,
+                        self.status.theme
+                    ));
+                });
+            self.show_help_debug_window = open;
+        }
+
+        if self.show_help_about_window {
+            let mut open = self.show_help_about_window;
+            egui::Window::new(self.text("menu.help.about").to_string())
+                .open(&mut open)
+                .resizable(false)
+                .default_width(320.0)
+                .show(ctx, |ui| {
+                    ui.heading("RustNotePad");
+                    ui.label(format!(
+                        "{} v{}",
+                        APP_TITLE,
+                        env!("CARGO_PKG_VERSION")
+                    ));
+                    ui.separator();
+                    ui.label(self.localized(
+                        "Rust-native Notepad++ compatibility preview.",
+                        "以 Rust 重建 Notepad++ 功能的預覽版本。",
+                    ));
+                    ui.label(self.localized(
+                        "This build focuses on demonstrating the UI shell.",
+                        "本版本專注於展示 UI 外殼。",
+                    ));
+                });
+            self.show_help_about_window = open;
+        }
+    }
+
     fn push_macro_log(&mut self, message: impl Into<String>) {
         if self.macro_messages.len() >= MAX_MACRO_MESSAGES {
             self.macro_messages.pop_front();
@@ -2974,6 +3065,428 @@ impl RustNotePadApp {
                 format!("未支援的編輯指令 {item_key}"),
             )),
         }
+    }
+
+    fn handle_view_command(&mut self, item_key: &str, ctx: Option<&egui::Context>) {
+        match item_key {
+            "menu.view.toggle_fullscreen" => {
+                self.view_fullscreen = !self.view_fullscreen;
+                if let Some(ctx) = ctx {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.view_fullscreen));
+                }
+                if self.view_fullscreen {
+                    self.push_localized_notification(
+                        "Entered fullscreen preview mode.",
+                        "已切換為全螢幕預覽模式。",
+                    );
+                } else {
+                    self.push_localized_notification(
+                        "Exited fullscreen preview mode.",
+                        "已離開全螢幕預覽模式。",
+                    );
+                }
+            }
+            "menu.view.restore_zoom" => {
+                self.layout.split_ratio = LayoutConfig::default().split_ratio;
+                self.status.refresh_from_layout(&self.layout);
+                self.push_localized_notification(
+                    "Split ratio restored to preview default.",
+                    "視窗分割比例已恢復為預設值。",
+                );
+            }
+            "menu.view.document_map" => {
+                self.document_map_visible = !self.document_map_visible;
+                if self.document_map_visible {
+                    self.push_localized_notification(
+                        "Document Map panel shown.",
+                        "已顯示文件地圖面板。",
+                    );
+                } else {
+                    self.push_localized_notification(
+                        "Document Map panel hidden.",
+                        "已隱藏文件地圖面板。",
+                    );
+                }
+            }
+            "menu.view.function_list" => {
+                self.function_list_visible = !self.function_list_visible;
+                if self.function_list_visible {
+                    self.push_localized_notification(
+                        "Function List panel enabled.",
+                        "已啟用函式清單面板。",
+                    );
+                } else {
+                    self.push_localized_notification(
+                        "Function List panel hidden.",
+                        "已隱藏函式清單面板。",
+                    );
+                }
+            }
+            "menu.view.project_panel" => {
+                self.project_panel_visible = !self.project_panel_visible;
+                if self.project_panel_visible {
+                    self.push_localized_notification(
+                        "Project panel visible.",
+                        "專案面板已顯示。",
+                    );
+                } else {
+                    self.push_localized_notification(
+                        "Project panel hidden.",
+                        "專案面板已隱藏。",
+                    );
+                }
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported view command {item_key}"),
+                format!("未支援的檢視指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_encoding_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.encoding.encode_ansi" => {
+                self.apply_encoding_selection("ANSI", "Switched encoding to ANSI.", "已切換為 ANSI 編碼。");
+            }
+            "menu.encoding.encode_utf8" => {
+                self.apply_encoding_selection("UTF-8", "Switched encoding to UTF-8.", "已切換為 UTF-8 編碼。");
+            }
+            "menu.encoding.encode_utf8_bom" => {
+                self.apply_encoding_selection("UTF-8 BOM", "Switched encoding to UTF-8 (BOM).", "已切換為 UTF-8（含 BOM）。");
+            }
+            "menu.encoding.encode_ucs2_le" => {
+                self.apply_encoding_selection("UCS-2 LE", "Switched encoding to UCS-2 LE.", "已切換為 UCS-2 小端編碼。");
+            }
+            "menu.encoding.encode_ucs2_be" => {
+                self.apply_encoding_selection("UCS-2 BE", "Switched encoding to UCS-2 BE.", "已切換為 UCS-2 大端編碼。");
+            }
+            "menu.encoding.convert_ansi" => {
+                self.apply_encoding_selection("ANSI", "Converted text to ANSI (preview).", "已（預覽）轉換為 ANSI 編碼。");
+            }
+            "menu.encoding.convert_utf8" => {
+                self.apply_encoding_selection("UTF-8", "Converted text to UTF-8 (preview).", "已（預覽）轉換為 UTF-8 編碼。");
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported encoding command {item_key}"),
+                format!("未支援的編碼指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_language_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.language.auto_detect" => self.auto_detect_language(),
+            "menu.language.english" | "menu.language.chinese_traditional"
+            | "menu.language.japanese" => self.apply_language_selection("plaintext"),
+            "menu.language.rust" => self.apply_language_selection("rust"),
+            "menu.language.json" => self.apply_language_selection("json"),
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported language command {item_key}"),
+                format!("未支援的語言指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_tools_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.tools.md5" => {
+                let digest = self.compute_md5();
+                self.editor_clipboard = digest.clone();
+                self.push_localized_notification(
+                    format!("Preview MD5 digest copied: {digest}"),
+                    format!("預覽版 MD5 值已複製：{digest}"),
+                );
+            }
+            "menu.tools.sha256" => {
+                let digest = self.compute_sha256();
+                self.editor_clipboard = digest.clone();
+                self.push_localized_notification(
+                    format!("Preview SHA-256 digest copied: {digest}"),
+                    format!("預覽版 SHA-256 值已複製：{digest}"),
+                );
+            }
+            "menu.tools.open_cmd" => {
+                self.push_localized_notification(
+                    format!(
+                        "Pretending to launch command prompt in {}",
+                        self.workspace_root.display()
+                    ),
+                    format!(
+                        "已模擬在 {} 開啟命令提示字元。",
+                        self.workspace_root.display()
+                    ),
+                );
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported tools command {item_key}"),
+                format!("未支援的工具指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_plugins_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.plugins.admin" => {
+                self.show_settings_window = true;
+                self.active_settings_page = SettingsPage::Plugins;
+                self.push_localized_notification(
+                    "Opened Plugins Admin panel.",
+                    "已開啟外掛管理頁面。",
+                );
+            }
+            "menu.plugins.open_folder" => {
+                let folder = self.workspace_root.join("plugins");
+                if let Err(err) = fs::create_dir_all(&folder) {
+                    let message = self.localized_owned(
+                        format!("Failed to prepare plugin folder: {err}"),
+                        format!("無法建立外掛資料夾：{err}"),
+                    );
+                    self.push_notification(message);
+                } else {
+                    self.push_localized_notification(
+                        format!("Plugin folder: {}", folder.display()),
+                        format!("外掛資料夾位置：{}", folder.display()),
+                    );
+                }
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported plugin command {item_key}"),
+                format!("未支援的外掛指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_window_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.window.duplicate" => match self.duplicate_active_tab() {
+                Ok(title) => self.push_localized_notification(
+                    format!("Duplicated tab as {title}."),
+                    format!("已建立 {title} 的複本。"),
+                ),
+                Err(err) => self.push_notification(err),
+            },
+            "menu.window.clone_other_view" => match self.clone_active_tab_to_other_view() {
+                Ok(_) => self.push_localized_notification(
+                    "Cloned tab into the other view.",
+                    "已在另一個檢視中開啟此分頁。",
+                ),
+                Err(err) => self.push_notification(err),
+            },
+            "menu.window.move_other_view" => match self.move_active_tab_to_other_view() {
+                Ok(_) => self.push_localized_notification(
+                    "Moved tab to the other view.",
+                    "已將分頁移動至另一個檢視。",
+                ),
+                Err(err) => self.push_notification(err),
+            },
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported window command {item_key}"),
+                format!("未支援的視窗指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn handle_help_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.help.user_manual" => {
+                self.show_help_manual_window = true;
+            }
+            "menu.help.debug_info" => {
+                self.show_help_debug_window = true;
+            }
+            "menu.help.about" => {
+                self.show_help_about_window = true;
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported help command {item_key}"),
+                format!("未支援的說明指令 {item_key}"),
+            )),
+        }
+    }
+
+    fn apply_encoding_selection(
+        &mut self,
+        encoding: &'static str,
+        message_en: &str,
+        message_zh: &str,
+    ) {
+        self.status.set_encoding(encoding);
+        self.push_localized_notification(message_en.to_string(), message_zh.to_string());
+    }
+
+    fn auto_detect_language(&mut self) {
+        let candidate = if let Some(path) = &self.current_document_path {
+            language_id_from_path(path.to_string_lossy().as_ref())
+        } else {
+            language_id_from_path(&self.current_document_id)
+        };
+        let current_id = self.current_document_id.clone();
+        self.set_tab_language_override(&current_id, candidate);
+        let language_name = self.language_display_name(candidate);
+        self.push_localized_notification(
+            format!("Detected document language: {language_name}"),
+            format!("已自動偵測文件語言：{language_name}"),
+        );
+    }
+
+    fn apply_language_selection(&mut self, language_id: &str) {
+        let current_id = self.current_document_id.clone();
+        self.set_tab_language_override(&current_id, language_id);
+        let language_name = self.language_display_name(language_id);
+        self.push_localized_notification(
+            format!("Document language set to {language_name}."),
+            format!("文件語言已切換為 {language_name}。"),
+        );
+    }
+
+    fn compute_md5(&self) -> String {
+        self.synthetic_hash(2, 0xA5A5_A5A5_A5A5_A5A5)
+    }
+
+    fn compute_sha256(&self) -> String {
+        self.synthetic_hash(4, 0x5A5A_5A5A_5A5A_5A5A)
+    }
+
+    fn synthetic_hash(&self, segments: usize, seed: u64) -> String {
+        let mut digest = String::new();
+        for idx in 0..segments {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            hasher.write_u64(seed.wrapping_add(idx as u64));
+            self.editor_preview.hash(&mut hasher);
+            digest.push_str(&format!("{:016x}", hasher.finish()));
+        }
+        digest
+    }
+
+    fn active_tab_snapshot(&self) -> Option<(usize, usize, TabView)> {
+        let active_id = &self.current_document_id;
+        self.layout
+            .panes
+            .iter()
+            .enumerate()
+            .find_map(|(pane_idx, pane)| {
+                pane.tabs
+                    .iter()
+                    .position(|tab| tab.id == *active_id)
+                    .map(|tab_idx| (pane_idx, tab_idx, pane.tabs[tab_idx].clone()))
+            })
+    }
+
+    fn duplicate_active_tab(&mut self) -> Result<String, String> {
+        let (pane_idx, tab_idx, template) = self
+            .active_tab_snapshot()
+            .ok_or_else(|| {
+                self.localized_owned(
+                    "No active tab to duplicate.".to_string(),
+                    "沒有可複製的分頁。".to_string(),
+                )
+            })?;
+        let mut new_tab = template.clone();
+        let new_id = format!("{}::dup{}", template.id, self.untitled_counter);
+        self.untitled_counter += 1;
+        new_tab.id = new_id.clone();
+        new_tab.title = format!("{} (Copy)", template.title);
+        new_tab.is_pinned = false;
+
+        if let Some(pane) = self.layout.panes.get_mut(pane_idx) {
+            let insert_at = (tab_idx + 1).min(pane.tabs.len());
+            pane.tabs.insert(insert_at, new_tab.clone());
+            pane.active = Some(new_id.clone());
+        } else {
+            return Err(self.localized_owned(
+                "Active pane not found.".to_string(),
+                "找不到目前的檢視窗格。".to_string(),
+            ));
+        }
+
+        self.current_document_id = new_id.clone();
+        self.current_document_path = None;
+        self.set_tab_dirty_state(&new_id, false);
+        self.document_index
+            .update_document(&self.current_document_id, &self.editor_preview);
+        self.status.refresh_from_layout(&self.layout);
+        Ok(new_tab.title)
+    }
+
+    fn clone_active_tab_to_other_view(&mut self) -> Result<(), String> {
+        let (source_idx, _, template) = self
+            .active_tab_snapshot()
+            .ok_or_else(|| {
+                self.localized_owned(
+                    "No active tab to clone.".to_string(),
+                    "沒有可複製的分頁。".to_string(),
+                )
+            })?;
+        let source_role = self.layout.panes[source_idx].role;
+        let target_role = match source_role {
+            PaneRole::Primary => PaneRole::Secondary,
+            PaneRole::Secondary => PaneRole::Primary,
+        };
+        let target_idx = self
+            .layout
+            .panes
+            .iter()
+            .position(|pane| pane.role == target_role)
+            .ok_or_else(|| {
+                self.localized_owned(
+                    "Secondary view is unavailable.".to_string(),
+                    "找不到另一個檢視窗格。".to_string(),
+                )
+            })?;
+        let target_pane = &mut self.layout.panes[target_idx];
+        if !target_pane
+            .tabs
+            .iter()
+            .any(|tab| tab.id == template.id)
+        {
+            target_pane.tabs.push(template);
+        }
+        target_pane.active = Some(self.current_document_id.clone());
+        self.status.refresh_from_layout(&self.layout);
+        Ok(())
+    }
+
+    fn move_active_tab_to_other_view(&mut self) -> Result<(), String> {
+        let (source_idx, tab_idx, template) = self.active_tab_snapshot().ok_or_else(|| {
+            self.localized_owned(
+                "No active tab to move.".to_string(),
+                "沒有可移動的分頁。".to_string(),
+            )
+        })?;
+        let source_role = self.layout.panes[source_idx].role;
+        let target_role = match source_role {
+            PaneRole::Primary => PaneRole::Secondary,
+            PaneRole::Secondary => PaneRole::Primary,
+        };
+        let target_idx = self
+            .layout
+            .panes
+            .iter()
+            .position(|pane| pane.role == target_role)
+            .ok_or_else(|| {
+                self.localized_owned(
+                    "Secondary view is unavailable.".to_string(),
+                    "找不到另一個檢視窗格。".to_string(),
+                )
+            })?;
+
+        {
+            let source_pane = &mut self.layout.panes[source_idx];
+            source_pane.tabs.remove(tab_idx);
+            if source_pane.tabs.is_empty() {
+                source_pane.active = None;
+            } else {
+                let fallback_index = tab_idx.min(source_pane.tabs.len() - 1);
+                source_pane.active = Some(source_pane.tabs[fallback_index].id.clone());
+            }
+        }
+
+        let target_pane = &mut self.layout.panes[target_idx];
+        target_pane.tabs.push(template);
+        target_pane.active = Some(self.current_document_id.clone());
+
+        self.status.refresh_from_layout(&self.layout);
+        Ok(())
     }
 
     fn perform_undo(&mut self) {
@@ -3866,6 +4379,22 @@ impl RustNotePadApp {
         });
     }
 
+    fn push_notification(&mut self, message: String) {
+        self.notification_log.push_front(message);
+        if self.notification_log.len() > MAX_NOTIFICATION_MESSAGES {
+            self.notification_log.pop_back();
+        }
+    }
+
+    fn push_localized_notification(
+        &mut self,
+        message_en: impl Into<String>,
+        message_zh: impl Into<String>,
+    ) {
+        let message = self.localized_owned(message_en.into(), message_zh.into());
+        self.push_notification(message);
+    }
+
     fn seed_profile_defaults(&mut self) {
         let mut entries = Vec::new();
         if self.profile_store.get("locale").is_none() {
@@ -4299,6 +4828,13 @@ impl RustNotePadApp {
                             let is_run = section.title_key == "menu.run";
                             let is_file = section.title_key == "menu.file";
                             let is_edit = section.title_key == "menu.edit";
+                            let is_view = section.title_key == "menu.view";
+                            let is_encoding = section.title_key == "menu.encoding";
+                            let is_language = section.title_key == "menu.language";
+                            let is_tools = section.title_key == "menu.tools";
+                            let is_plugins = section.title_key == "menu.plugins";
+                            let is_window = section.title_key == "menu.window";
+                            let is_help = section.title_key == "menu.help";
                             for item_key in section.item_keys {
                                 let label = self.text(item_key).into_owned();
                                 if is_settings {
@@ -4324,6 +4860,41 @@ impl RustNotePadApp {
                                 } else if is_edit {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_edit_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_view {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_view_command(item_key, Some(ui.ctx()));
+                                        ui.close_menu();
+                                    }
+                                } else if is_encoding {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_encoding_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_language {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_language_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_tools {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_tools_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_plugins {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_plugins_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_window {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_window_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_help {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_help_command(item_key);
                                         ui.close_menu();
                                     }
                                 } else {
@@ -4417,9 +4988,16 @@ impl RustNotePadApp {
                         self.persist_session();
                     }
                     ui.add_space(6.0);
-                    let root_children = self.project_tree.root.children.clone();
-                    for child in root_children.iter() {
-                        self.render_project_node(ui, child, 0);
+                    if self.project_panel_visible {
+                        let root_children = self.project_tree.root.children.clone();
+                        for child in root_children.iter() {
+                            self.render_project_node(ui, child, 0);
+                        }
+                    } else {
+                        ui.label(self.localized(
+                            "Project panel hidden via View menu.",
+                            "專案面板已透過檢視選單隱藏。",
+                        ));
                     }
                     let has_document = !self.editor_preview.trim().is_empty();
                     let mut optional_sections_rendered = false;
@@ -4431,13 +5009,15 @@ impl RustNotePadApp {
                                 this.render_highlight_summary(ui);
                             },
                         );
-                        self.render_sidebar_section(
-                            ui,
-                            &mut optional_sections_rendered,
-                            |this, ui| {
-                                this.render_function_list_panel(ui);
-                            },
-                        );
+                        if self.function_list_visible {
+                            self.render_sidebar_section(
+                                ui,
+                                &mut optional_sections_rendered,
+                                |this, ui| {
+                                    this.render_function_list_panel(ui);
+                                },
+                            );
+                        }
                     }
                     if self.should_show_completion_panel() {
                         self.render_sidebar_section(
@@ -4656,8 +5236,20 @@ impl RustNotePadApp {
                         }
                     }
                     "notifications" => {
-                        ui.label(self.text("panel.notifications.idle"));
-                        ui.label(self.text("panel.notifications.font_warning"));
+                        if self.notification_log.is_empty() {
+                            ui.label(self.text("panel.notifications.idle"));
+                        } else {
+                            for entry in self.notification_log.iter() {
+                                ui.label(entry);
+                            }
+                        }
+                        if let Some(font_warning) = &self.font_warning {
+                            ui.separator();
+                            ui.label(font_warning);
+                        } else {
+                            ui.add_space(4.0);
+                            ui.label(self.text("panel.notifications.font_warning"));
+                        }
                     }
                     "lsp" => {
                         if self.lsp_client.is_online() {
@@ -5392,13 +5984,16 @@ impl App for RustNotePadApp {
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
         self.show_left_sidebar(ctx);
-        self.show_right_sidebar(ctx);
+        if self.document_map_visible {
+            self.show_right_sidebar(ctx);
+        }
         self.show_bottom_dock(ctx);
         self.show_status_bar(ctx);
         self.show_editor_area(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
+        self.render_help_windows(ctx);
 
         if self.pending_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -6358,6 +6953,13 @@ mod tests {
     use serde_json::json;
     use tempfile::{tempdir, tempdir_in};
 
+    fn make_test_app() -> RustNotePadApp {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().expect("workspace root");
+        std::env::set_current_dir(workspace_root).expect("set cwd to workspace root");
+        RustNotePadApp::default()
+    }
+
     #[test]
     fn switching_to_traditional_chinese_locale_does_not_panic() {
         // The GUI reads localization files relative to the workspace root at runtime.
@@ -6928,6 +7530,77 @@ mod tests {
             app.update_editor_selection(Some(pending));
         }
         assert_eq!(app.editor_preview, "hello");
+    }
+
+    #[test]
+    fn view_menu_toggle_affects_document_map() {
+        let mut app = make_test_app();
+        assert!(app.document_map_visible);
+        app.handle_view_command("menu.view.document_map", None);
+        assert!(!app.document_map_visible);
+        app.handle_view_command("menu.view.document_map", None);
+        assert!(app.document_map_visible);
+    }
+
+    #[test]
+    fn encoding_selection_updates_status() {
+        let mut app = make_test_app();
+        app.handle_encoding_command("menu.encoding.encode_ucs2_be");
+        assert_eq!(app.status.encoding, "UCS-2 BE");
+    }
+
+    #[test]
+    fn language_menu_switches_modes() {
+        let mut app = make_test_app();
+        app.handle_language_command("menu.language.json");
+        assert_eq!(app.current_language_id, "json");
+    }
+
+    #[test]
+    fn tools_menu_hashes_into_clipboard() {
+        let mut app = make_test_app();
+        app.editor_preview = "abc".into();
+        app.handle_tools_command("menu.tools.md5");
+        assert!(
+            !app.editor_clipboard.is_empty(),
+            "tools command should populate clipboard"
+        );
+    }
+
+    #[test]
+    fn plugins_menu_opens_admin_settings() {
+        let mut app = make_test_app();
+        app.handle_plugins_command("menu.plugins.admin");
+        assert!(app.show_settings_window);
+        assert!(matches!(app.active_settings_page, SettingsPage::Plugins));
+    }
+
+    #[test]
+    fn window_menu_duplicate_adds_tab() {
+        let mut app = make_test_app();
+        let before = app
+            .layout
+            .panes
+            .iter()
+            .find(|pane| pane.role == PaneRole::Primary)
+            .map(|pane| pane.tabs.len())
+            .unwrap_or(0);
+        app.handle_window_command("menu.window.duplicate");
+        let after = app
+            .layout
+            .panes
+            .iter()
+            .find(|pane| pane.role == PaneRole::Primary)
+            .map(|pane| pane.tabs.len())
+            .unwrap_or(0);
+        assert!(after > before, "duplicate should append a new tab");
+    }
+
+    #[test]
+    fn help_menu_flags_about_window() {
+        let mut app = make_test_app();
+        app.handle_help_command("menu.help.about");
+        assert!(app.show_help_about_window);
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
