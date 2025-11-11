@@ -52,6 +52,7 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ("menu.view.document_map", "Document Map"),
     ("menu.view.function_list", "Function List"),
     ("menu.view.project_panel", "Project Panel ▸"),
+    ("menu.view.bottom_panels", "Bottom Panels"),
     ("menu.encoding", "Encoding"),
     ("menu.encoding.encode_ansi", "Encode in ANSI"),
     ("menu.encoding.encode_utf8", "Encode in UTF-8"),
@@ -442,10 +443,7 @@ impl LocalizationManager {
 
     /// Loads locale definitions from multiple directories in order.
     /// （依序從多個目錄載入語系定義。）
-    pub fn load_from_dirs<I, P>(
-        paths: I,
-        default_locale: &str,
-    ) -> Result<Self, LocalizationError>
+    pub fn load_from_dirs<I, P>(paths: I, default_locale: &str) -> Result<Self, LocalizationError>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
@@ -668,9 +666,7 @@ impl LocalizationManager {
 }
 
 fn default_catalog() -> LocaleCatalog {
-    let plural_rules = plural_rules_for(DEFAULT_LOCALE_CODE)
-        .ok()
-        .flatten();
+    let plural_rules = plural_rules_for(DEFAULT_LOCALE_CODE).ok().flatten();
     LocaleCatalog {
         summary: LocaleSummary {
             code: DEFAULT_LOCALE_CODE.to_string(),

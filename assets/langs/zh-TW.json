@@ -38,6 +38,7 @@
     "menu.view.document_map": "文件地圖",
     "menu.view.function_list": "函式清單",
     "menu.view.project_panel": "專案面板 ▸",
+    "menu.view.bottom_panels": "底部面板",
     "menu.encoding": "編碼",
     "menu.encoding.encode_ansi": "設定為 ANSI 編碼",
     "menu.encoding.encode_utf8": "設定為 UTF-8 編碼",

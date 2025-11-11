@@ -1301,6 +1301,7 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
                 "menu.view.document_map",
                 "menu.view.function_list",
                 "menu.view.project_panel",
+                "menu.view.bottom_panels",
             ],
         ),
         MenuSection::new(
@@ -1717,6 +1718,7 @@ struct RustNotePadApp {
     project_panel_visible: bool,
     function_list_visible: bool,
     document_map_visible: bool,
+    bottom_panels_visible: bool,
     notification_log: VecDeque<String>,
     show_help_manual_window: bool,
     show_help_debug_window: bool,
@@ -2108,6 +2110,7 @@ impl RustNotePadApp {
             project_panel_visible: true,
             function_list_visible: true,
             document_map_visible: true,
+            bottom_panels_visible: false,
             notification_log: VecDeque::new(),
             show_help_manual_window: false,
             show_help_debug_window: false,
@@ -3200,6 +3203,20 @@ impl RustNotePadApp {
                     self.push_localized_notification("Project panel hidden.", "專案面板已隱藏。");
                 }
             }
+            "menu.view.bottom_panels" => {
+                self.bottom_panels_visible = !self.bottom_panels_visible;
+                if self.bottom_panels_visible {
+                    self.push_localized_notification(
+                        "Bottom panels shown.",
+                        "底部面板已顯示。",
+                    );
+                } else {
+                    self.push_localized_notification(
+                        "Bottom panels hidden.",
+                        "底部面板已隱藏。",
+                    );
+                }
+            }
             _ => log_warn(self.localized_owned(
                 format!("Unsupported view command {item_key}"),
                 format!("未支援的檢視指令 {item_key}"),
@@ -3870,6 +3887,9 @@ impl RustNotePadApp {
     }
 
     fn execute_run_spec(&mut self, title: String, spec: RunSpec) {
+        if !self.bottom_panels_visible {
+            self.bottom_panels_visible = true;
+        }
         self.reveal_run_panel();
         let command = Self::format_run_command(&spec);
         let working_dir = spec.working_dir.clone();
@@ -5158,6 +5178,9 @@ impl RustNotePadApp {
     }
 
     fn show_bottom_dock(&mut self, ctx: &egui::Context) {
+        if !self.bottom_panels_visible {
+            return;
+        }
         egui::TopBottomPanel::bottom("bottom_panels")
             .resizable(true)
             .min_height(140.0)

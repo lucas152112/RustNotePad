@@ -1,5 +1,15 @@
 # Develop Diary / 開發日誌
 
+## 2025-11-12
+
+### 完成 / Completed
+- 增強 GUI 啟動診斷流程：加入 Wayland/X11 連線健康檢查、在記錄檔與標準輸出同步呈現英文/中文訊息，並於 `instance.lock` 寫入 PID 以自動清除失效鎖定；確保在無法啟動圖形環境時能提供足夠的除錯資訊。 / Strengthened GUI startup diagnostics with Wayland/X11 connectivity probes, bilingual logging, and PID-aware `instance.lock` handling so stale locks are auto-removed, giving clearer guidance whenever the compositor is unavailable.
+- 調整 UI 預設版面：僅保留專案樹、主要編輯分頁、預設預覽區與狀態列，並提供新的「底部面板」檢視切換來顯示/隱藏搜尋結果與主控台，滿足 UI Preview 初始畫面的需求。 / Simplified the default UI layout to show only the project tree, editor tabs, preview pane, and status bar, while adding a “Bottom Panels” view toggle for users who want the find results/console dock.
+- 補充英文/正體中文雙語註解與字串資源，確保日誌、通知與檢視選單皆提供對應翻譯，且 GUI 仍依照使用者設定語系呈現單一語言。 / Expanded bilingual comments and string resources so logs, notifications, and the View menu include both Traditional Chinese and English context, while the GUI continues to render solely in the selected locale.
+
+### 未完成 / Pending
+- 針對其餘歷史註解與文件補齊雙語內容，並擴充自動化測試覆蓋更多 GUI 互動情境。 / Backfill bilingual text across older comments/docs and extend automated coverage for additional GUI interactions.
+
 ## 2025-11-05
 
 ### 完成 / Completed
