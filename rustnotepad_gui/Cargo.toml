@@ -26,6 +26,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.24", default-features = false, features = ["png"] }
 serde_json = "1.0"
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wayland-client = "0.31"
+x11rb = { version = "0.13.2", default-features = false, features = ["allow-unsafe-code"] }
+
 [[bin]]
 name = "rustnotepad"
 path = "src/main.rs"

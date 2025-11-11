@@ -52,10 +52,12 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write as IoWrite};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::hash::{Hash, Hasher};
+use std::process;
 use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -72,6 +74,12 @@ use rustnotepad_printing::{
     PrintJobOptions, PrintPreviewKey, SimplePaginator,
 };
 use serde_json;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::ffi::{CString, OsStr};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(all(unix, not(target_os = "macos")))]
+use x11rb::xcb_ffi::XCBConnection;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
@@ -871,23 +879,60 @@ impl InstanceGuard {
         let state_dir = workspace_root.join(".rustnotepad");
         fs::create_dir_all(&state_dir)?;
         let lock_path = state_dir.join("instance.lock");
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(file) => Ok(Self {
-                _file: file,
-                path: lock_path,
-            }),
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "workspace {} is already locked by another instance",
-                    workspace_root.display()
-                ),
-            )),
-            Err(err) => Err(err),
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    if let Err(err) = writeln!(file, "{}", process::id()) {
+                        log_warn(format!(
+                            "Failed to write PID into workspace lock {}: {err}",
+                            lock_path.display()
+                        ));
+                    }
+                    return Ok(Self {
+                        _file: file,
+                        path: lock_path,
+                    });
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    match lock_is_stale(&lock_path) {
+                        Ok(true) => {
+                            log_warn(format!(
+                                "Removing stale workspace lock {}",
+                                lock_path.display()
+                            ));
+                            fs::remove_file(&lock_path)?;
+                            continue;
+                        }
+                        Ok(false) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                format!(
+                                    "workspace {} is already locked by another instance",
+                                    workspace_root.display()
+                                ),
+                            ));
+                        }
+                        Err(probe_err) => {
+                            log_warn(format!(
+                                "Failed to inspect workspace lock {}: {probe_err}",
+                                lock_path.display()
+                            ));
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                format!(
+                                    "workspace {} is already locked by another instance",
+                                    workspace_root.display()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 }
@@ -902,6 +947,36 @@ impl Drop for InstanceGuard {
                 ));
             }
         }
+    }
+}
+
+fn lock_is_stale(lock_path: &Path) -> io::Result<bool> {
+    let contents = match fs::read_to_string(lock_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(err) => return Err(err),
+    };
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(true);
+    }
+    let recorded_pid: u32 = match trimmed.parse() {
+        Ok(pid) => pid,
+        Err(_) => return Ok(true),
+    };
+    if recorded_pid == process::id() {
+        return Ok(true);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::path::PathBuf;
+        let proc_path = PathBuf::from("/proc").join(recorded_pid.to_string());
+        Ok(!proc_path.exists())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(false)
     }
 }
 
@@ -1556,7 +1631,6 @@ impl StatusBarState {
     fn set_encoding(&mut self, encoding: &'static str) {
         self.encoding = encoding;
     }
-
 }
 
 struct RustNotePadApp {
@@ -2782,11 +2856,7 @@ impl RustNotePadApp {
                 .default_width(320.0)
                 .show(ctx, |ui| {
                     ui.heading("RustNotePad");
-                    ui.label(format!(
-                        "{} v{}",
-                        APP_TITLE,
-                        env!("CARGO_PKG_VERSION")
-                    ));
+                    ui.label(format!("{} v{}", APP_TITLE, env!("CARGO_PKG_VERSION")));
                     ui.separator();
                     ui.label(self.localized(
                         "Rust-native Notepad++ compatibility preview.",
@@ -3125,15 +3195,9 @@ impl RustNotePadApp {
             "menu.view.project_panel" => {
                 self.project_panel_visible = !self.project_panel_visible;
                 if self.project_panel_visible {
-                    self.push_localized_notification(
-                        "Project panel visible.",
-                        "專案面板已顯示。",
-                    );
+                    self.push_localized_notification("Project panel visible.", "專案面板已顯示。");
                 } else {
-                    self.push_localized_notification(
-                        "Project panel hidden.",
-                        "專案面板已隱藏。",
-                    );
+                    self.push_localized_notification("Project panel hidden.", "專案面板已隱藏。");
                 }
             }
             _ => log_warn(self.localized_owned(
@@ -3146,25 +3210,53 @@ impl RustNotePadApp {
     fn handle_encoding_command(&mut self, item_key: &str) {
         match item_key {
             "menu.encoding.encode_ansi" => {
-                self.apply_encoding_selection("ANSI", "Switched encoding to ANSI.", "已切換為 ANSI 編碼。");
+                self.apply_encoding_selection(
+                    "ANSI",
+                    "Switched encoding to ANSI.",
+                    "已切換為 ANSI 編碼。",
+                );
             }
             "menu.encoding.encode_utf8" => {
-                self.apply_encoding_selection("UTF-8", "Switched encoding to UTF-8.", "已切換為 UTF-8 編碼。");
+                self.apply_encoding_selection(
+                    "UTF-8",
+                    "Switched encoding to UTF-8.",
+                    "已切換為 UTF-8 編碼。",
+                );
             }
             "menu.encoding.encode_utf8_bom" => {
-                self.apply_encoding_selection("UTF-8 BOM", "Switched encoding to UTF-8 (BOM).", "已切換為 UTF-8（含 BOM）。");
+                self.apply_encoding_selection(
+                    "UTF-8 BOM",
+                    "Switched encoding to UTF-8 (BOM).",
+                    "已切換為 UTF-8（含 BOM）。",
+                );
             }
             "menu.encoding.encode_ucs2_le" => {
-                self.apply_encoding_selection("UCS-2 LE", "Switched encoding to UCS-2 LE.", "已切換為 UCS-2 小端編碼。");
+                self.apply_encoding_selection(
+                    "UCS-2 LE",
+                    "Switched encoding to UCS-2 LE.",
+                    "已切換為 UCS-2 小端編碼。",
+                );
             }
             "menu.encoding.encode_ucs2_be" => {
-                self.apply_encoding_selection("UCS-2 BE", "Switched encoding to UCS-2 BE.", "已切換為 UCS-2 大端編碼。");
+                self.apply_encoding_selection(
+                    "UCS-2 BE",
+                    "Switched encoding to UCS-2 BE.",
+                    "已切換為 UCS-2 大端編碼。",
+                );
             }
             "menu.encoding.convert_ansi" => {
-                self.apply_encoding_selection("ANSI", "Converted text to ANSI (preview).", "已（預覽）轉換為 ANSI 編碼。");
+                self.apply_encoding_selection(
+                    "ANSI",
+                    "Converted text to ANSI (preview).",
+                    "已（預覽）轉換為 ANSI 編碼。",
+                );
             }
             "menu.encoding.convert_utf8" => {
-                self.apply_encoding_selection("UTF-8", "Converted text to UTF-8 (preview).", "已（預覽）轉換為 UTF-8 編碼。");
+                self.apply_encoding_selection(
+                    "UTF-8",
+                    "Converted text to UTF-8 (preview).",
+                    "已（預覽）轉換為 UTF-8 編碼。",
+                );
             }
             _ => log_warn(self.localized_owned(
                 format!("Unsupported encoding command {item_key}"),
@@ -3176,7 +3268,8 @@ impl RustNotePadApp {
     fn handle_language_command(&mut self, item_key: &str) {
         match item_key {
             "menu.language.auto_detect" => self.auto_detect_language(),
-            "menu.language.english" | "menu.language.chinese_traditional"
+            "menu.language.english"
+            | "menu.language.chinese_traditional"
             | "menu.language.japanese" => self.apply_language_selection("plaintext"),
             "menu.language.rust" => self.apply_language_selection("rust"),
             "menu.language.json" => self.apply_language_selection("json"),
@@ -3373,14 +3466,12 @@ impl RustNotePadApp {
     }
 
     fn duplicate_active_tab(&mut self) -> Result<String, String> {
-        let (pane_idx, tab_idx, template) = self
-            .active_tab_snapshot()
-            .ok_or_else(|| {
-                self.localized_owned(
-                    "No active tab to duplicate.".to_string(),
-                    "沒有可複製的分頁。".to_string(),
-                )
-            })?;
+        let (pane_idx, tab_idx, template) = self.active_tab_snapshot().ok_or_else(|| {
+            self.localized_owned(
+                "No active tab to duplicate.".to_string(),
+                "沒有可複製的分頁。".to_string(),
+            )
+        })?;
         let mut new_tab = template.clone();
         let new_id = format!("{}::dup{}", template.id, self.untitled_counter);
         self.untitled_counter += 1;
@@ -3409,14 +3500,12 @@ impl RustNotePadApp {
     }
 
     fn clone_active_tab_to_other_view(&mut self) -> Result<(), String> {
-        let (source_idx, _, template) = self
-            .active_tab_snapshot()
-            .ok_or_else(|| {
-                self.localized_owned(
-                    "No active tab to clone.".to_string(),
-                    "沒有可複製的分頁。".to_string(),
-                )
-            })?;
+        let (source_idx, _, template) = self.active_tab_snapshot().ok_or_else(|| {
+            self.localized_owned(
+                "No active tab to clone.".to_string(),
+                "沒有可複製的分頁。".to_string(),
+            )
+        })?;
         let source_role = self.layout.panes[source_idx].role;
         let target_role = match source_role {
             PaneRole::Primary => PaneRole::Secondary,
@@ -3434,11 +3523,7 @@ impl RustNotePadApp {
                 )
             })?;
         let target_pane = &mut self.layout.panes[target_idx];
-        if !target_pane
-            .tabs
-            .iter()
-            .any(|tab| tab.id == template.id)
-        {
+        if !target_pane.tabs.iter().any(|tab| tab.id == template.id) {
             target_pane.tabs.push(template);
         }
         target_pane.active = Some(self.current_document_id.clone());
@@ -6816,6 +6901,212 @@ fn install_panic_logger() {
     });
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+fn configure_winit_backend() -> Result<(), String> {
+    use std::env;
+
+    let backend_override = env::var_os("WINIT_UNIX_BACKEND").is_some();
+
+    let wayland_status = detect_wayland_backend();
+    let x11_status = detect_x11_backend();
+
+    log_backend_environment(&wayland_status, &x11_status);
+
+    if backend_override {
+        return Ok(());
+    }
+
+    if matches!(wayland_status, BackendStatus::Available) {
+        return Ok(());
+    }
+    if matches!(x11_status, BackendStatus::Available) {
+        env::set_var("WINIT_UNIX_BACKEND", "x11");
+        if !matches!(wayland_status, BackendStatus::MissingEnv) {
+            log_warn(
+                "Wayland compositor unavailable for this process; forcing WINIT_UNIX_BACKEND=x11.",
+            );
+            disable_wayland_env();
+        }
+        return Ok(());
+    }
+
+    if let BackendStatus::Error(message) = &wayland_status {
+        log_warn(format!(
+            "Wayland compositor probe failed: {message}; trying other backends."
+        ));
+    } else if matches!(wayland_status, BackendStatus::MissingEnv) {
+        log_warn("WAYLAND_DISPLAY is unset; skipping Wayland backend.");
+    }
+
+    if let BackendStatus::Error(message) = &x11_status {
+        log_warn(format!(
+            "DISPLAY is set but connecting to the X11 server failed: {message}."
+        ));
+    } else if matches!(x11_status, BackendStatus::MissingEnv) {
+        log_warn("DISPLAY is unset; X11 backend is unavailable.");
+    }
+
+    let mut details = Vec::new();
+    match wayland_status {
+        BackendStatus::MissingEnv => details.push("WAYLAND_DISPLAY is unset".to_string()),
+        BackendStatus::Error(message) => {
+            details.push(format!("Wayland probe failed: {message}"));
+        }
+        BackendStatus::Available => {}
+    }
+    match x11_status {
+        BackendStatus::MissingEnv => details.push("DISPLAY is unset".to_string()),
+        BackendStatus::Error(message) => {
+            details.push(format!("X11 probe failed: {message}"));
+        }
+        BackendStatus::Available => {}
+    }
+
+    Err(format!(
+        "No usable GUI backend detected ({}). \
+Run RustNotePad inside a desktop session or launch it under `xvfb-run`.",
+        details.join("; ")
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn disable_wayland_env() {
+    use std::env;
+    env::remove_var("WAYLAND_DISPLAY");
+    env::remove_var("WAYLAND_SOCKET");
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn wayland_compositor_available() -> Result<bool, String> {
+    use wayland_client::{
+        globals::{registry_queue_init, GlobalListContents},
+        protocol::wl_registry,
+        Connection, Dispatch, QueueHandle,
+    };
+
+    struct RegistryProbe;
+
+    impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for RegistryProbe {
+        fn event(
+            _state: &mut Self,
+            _proxy: &wl_registry::WlRegistry,
+            _event: wl_registry::Event,
+            _data: &GlobalListContents,
+            _conn: &Connection,
+            _qh: &QueueHandle<Self>,
+        ) {
+            // registry_queue_init keeps the global list up to date for us.
+        }
+    }
+
+    let connection = Connection::connect_to_env()
+        .map_err(|err| format!("connect to Wayland display failed: {err}"))?;
+    let (globals, _event_queue) = registry_queue_init::<RegistryProbe>(&connection)
+        .map_err(|err| format!("Wayland registry initialization failed: {err}"))?;
+    Ok(globals
+        .contents()
+        .with_list(|items| items.iter().any(|global| global.interface == "wl_compositor")))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackendStatus {
+    Available,
+    MissingEnv,
+    Error(String),
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl fmt::Display for BackendStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendStatus::Available => write!(f, "available"),
+            BackendStatus::MissingEnv => write!(f, "missing-env"),
+            BackendStatus::Error(message) => write!(f, "error: {message}"),
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn detect_wayland_backend() -> BackendStatus {
+    let has_wayland_env =
+        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("WAYLAND_SOCKET").is_some();
+    if !has_wayland_env {
+        return BackendStatus::MissingEnv;
+    }
+
+    match wayland_compositor_available() {
+        Ok(true) => BackendStatus::Available,
+        Ok(false) => BackendStatus::Error(
+            "WAYLAND_DISPLAY is set but no wl_compositor global was advertised".to_string(),
+        ),
+        Err(err) => BackendStatus::Error(err),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn detect_x11_backend() -> BackendStatus {
+    let display = match std::env::var_os("DISPLAY") {
+        Some(value) if !value.is_empty() => value,
+        _ => return BackendStatus::MissingEnv,
+    };
+
+    match ensure_x11_display_connects(&display) {
+        Ok(()) => BackendStatus::Available,
+        Err(err) => BackendStatus::Error(err),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn ensure_x11_display_connects(display: &OsStr) -> Result<(), String> {
+    let display_lossy = display.to_string_lossy();
+    let c_string = CString::new(display.as_bytes())
+        .map_err(|_| format!("DISPLAY value \"{display_lossy}\" contains interior null bytes"))?;
+    match XCBConnection::connect(Some(c_string.as_c_str())) {
+        Ok((_conn, _)) => Ok(()),
+        Err(err) => Err(format!("connect to DISPLAY \"{display_lossy}\" failed: {err}")),
+    }
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn configure_winit_backend() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn log_backend_environment(wayland_status: &BackendStatus, x11_status: &BackendStatus) {
+    fn describe_var(name: &str) -> String {
+        std::env::var_os(name)
+            .map(|value| {
+                let display = value.to_string_lossy().into_owned();
+                if display.is_empty() {
+                    "set-to-empty-string".to_string()
+                } else {
+                    display
+                }
+            })
+            .unwrap_or_else(|| "unset".to_string())
+    }
+
+    let diag = [
+        ("WINIT_UNIX_BACKEND", describe_var("WINIT_UNIX_BACKEND")),
+        ("WAYLAND_DISPLAY", describe_var("WAYLAND_DISPLAY")),
+        ("WAYLAND_SOCKET", describe_var("WAYLAND_SOCKET")),
+        ("DISPLAY", describe_var("DISPLAY")),
+        ("XAUTHORITY", describe_var("XAUTHORITY")),
+        ("XDG_SESSION_TYPE", describe_var("XDG_SESSION_TYPE")),
+    ]
+    .iter()
+    .map(|(key, value)| format!("{key}={value}"))
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    log_info(format!(
+        "Backend diagnostics: {diag}; wayland_status={}; x11_status={}",
+        wayland_status, x11_status
+    ));
+}
+
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -6876,6 +7167,11 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
 
 fn main() -> eframe::Result<()> {
     install_panic_logger();
+    if let Err(err) = configure_winit_backend() {
+        log_error(err.clone());
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
     let launch_config = match rustnotepad_cmdline::parse(std::env::args_os()) {
         Ok(config) => config,
         Err(err) => {
