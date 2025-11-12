@@ -4,8 +4,8 @@ use eframe::{egui, App, Frame, NativeOptions};
 use egui::text::CCursor;
 use egui::text_edit::CCursorRange;
 use egui::{
-    vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, RichText,
-    TextStyle,
+    style::Margin, vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout,
+    Rect, RichText, TextStyle,
 };
 use image::load_from_memory;
 use once_cell::sync::Lazy;
@@ -3204,7 +3204,8 @@ impl RustNotePadApp {
                 }
             }
             "menu.view.bottom_panels" => {
-                self.bottom_panels_visible = !self.bottom_panels_visible;
+                let desired = !self.bottom_panels_visible;
+                self.set_bottom_panels_visible(desired);
                 if self.bottom_panels_visible {
                     self.push_localized_notification(
                         "Bottom panels shown.",
@@ -3887,9 +3888,7 @@ impl RustNotePadApp {
     }
 
     fn execute_run_spec(&mut self, title: String, spec: RunSpec) {
-        if !self.bottom_panels_visible {
-            self.bottom_panels_visible = true;
-        }
+        self.set_bottom_panels_visible(true);
         self.reveal_run_panel();
         let command = Self::format_run_command(&spec);
         let working_dir = spec.working_dir.clone();
@@ -5177,232 +5176,213 @@ impl RustNotePadApp {
             });
     }
 
-    fn show_bottom_dock(&mut self, ctx: &egui::Context) {
-        if !self.bottom_panels_visible {
+    fn render_bottom_dock(&mut self, ui: &mut egui::Ui, panel_ids: &[String]) {
+        if panel_ids.is_empty() {
+            ui.label(self.text("panel.no_panels_configured"));
             return;
         }
-        egui::TopBottomPanel::bottom("bottom_panels")
-            .resizable(true)
-            .min_height(140.0)
-            .show(ctx, |ui| {
-                let panel_ids = self.layout.bottom_dock.visible_panels.clone();
-                if panel_ids.is_empty() {
-                    ui.label(self.text("panel.no_panels_configured"));
-                    return;
+
+        ui.horizontal(|ui| {
+            for (idx, panel) in panel_ids.iter().enumerate() {
+                let title_key = match panel.as_str() {
+                    "find_results" => Some("panel.find_results.title"),
+                    "console" => Some("panel.console.title"),
+                    "notifications" => Some("panel.notifications.title"),
+                    "lsp" => Some("panel.lsp.title"),
+                    _ => None,
+                };
+                let title = title_key
+                    .map(|key| self.text(key).into_owned())
+                    .unwrap_or_else(|| panel.to_string());
+                let selected = idx == self.bottom_tab_index;
+                if ui
+                    .selectable_label(selected, RichText::new(title).strong())
+                    .clicked()
+                {
+                    self.bottom_tab_index = idx;
+                    self.layout.bottom_dock.active_panel = Some(panel.to_string());
                 }
+            }
+        });
+        ui.separator();
 
-                ui.horizontal(|ui| {
-                    for (idx, panel) in panel_ids.iter().enumerate() {
-                        let title_key = match panel.as_str() {
-                            "find_results" => Some("panel.find_results.title"),
-                            "console" => Some("panel.console.title"),
-                            "notifications" => Some("panel.notifications.title"),
-                            "lsp" => Some("panel.lsp.title"),
-                            _ => None,
-                        };
-                        let title = title_key
-                            .map(|key| self.text(key).into_owned())
-                            .unwrap_or_else(|| panel.to_string());
-                        let selected = idx == self.bottom_tab_index;
-                        if ui
-                            .selectable_label(selected, RichText::new(title).strong())
-                            .clicked()
-                        {
-                            self.bottom_tab_index = idx;
-                            self.layout.bottom_dock.active_panel = Some(panel.to_string());
-                        }
-                    }
-                });
-                ui.separator();
+        let active_panel = panel_ids
+            .get(self.bottom_tab_index)
+            .cloned()
+            .or_else(|| self.layout.bottom_dock.active_panel.clone())
+            .unwrap_or_else(|| "find_results".into());
 
-                let active_panel = panel_ids
-                    .get(self.bottom_tab_index)
-                    .cloned()
-                    .or_else(|| self.layout.bottom_dock.active_panel.clone())
-                    .unwrap_or_else(|| "find_results".into());
-
-                match active_panel.as_str() {
-                    "find_results" => {
-                        // Intentionally blank until a search populates results.
-                    }
-                    "console" => {
-                        if let Some(error) = &self.run_last_error {
-                            ui.colored_label(Color32::from_rgb(239, 68, 68), format!("{error}"));
-                            ui.separator();
-                        }
-                        if self.run_history.is_empty() {
-                            ui.label(self.localized("No run history yet", "尚無執行紀錄"));
-                        } else {
-                            for entry in self.run_history.iter() {
-                                ui.group(|ui| {
-                                    let exit_code = entry
-                                        .result
-                                        .exit_code
-                                        .map(|code| code.to_string())
-                                        .unwrap_or_else(|| "signal".to_string());
-                                    ui.label(self.localized_owned(
-                                        format!(
-                                            "{}\nExit: {} | Duration: {} ms",
-                                            entry.title, exit_code, entry.result.duration_ms
-                                        ),
-                                        format!(
-                                            "{}\n結束碼：{}｜耗時 {} 毫秒",
-                                            entry.title, exit_code, entry.result.duration_ms
-                                        ),
-                                    ));
-                                    ui.label(self.localized_owned(
-                                        format!("Command: {}", entry.command),
-                                        format!("指令：{}", entry.command),
-                                    ));
-                                    let workdir = entry
-                                        .working_dir
-                                        .as_ref()
-                                        .map(|path| path.display().to_string())
-                                        .unwrap_or_else(|| "-".to_string());
-                                    ui.label(self.localized_owned(
-                                        format!("Workdir: {}", workdir),
-                                        format!("工作目錄：{}", workdir),
-                                    ));
-                                    let env_text = if entry.env.is_empty() {
-                                        "-".to_string()
-                                    } else {
-                                        entry
-                                            .env
-                                            .iter()
-                                            .map(|(k, v)| format!("{k}={v}"))
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    };
-                                    ui.label(self.localized_owned(
-                                        format!("Env overrides: {}", env_text),
-                                        format!("環境覆寫：{}", env_text),
-                                    ));
-                                    let cleared_en = if entry.cleared_env { "yes" } else { "no" };
-                                    let cleared_zh = if entry.cleared_env { "是" } else { "否" };
-                                    ui.label(self.localized_owned(
-                                        format!("Cleared env: {cleared_en}"),
-                                        format!("已清除環境變數：{cleared_zh}"),
-                                    ));
-                                    let timeout_desc_en = entry
-                                        .timeout_ms
-                                        .map(|ms| format!("{:.2} s", (ms as f64) / 1000.0))
-                                        .unwrap_or_else(|| "disabled".to_string());
-                                    let timeout_desc_zh = entry
-                                        .timeout_ms
-                                        .map(|ms| format!("{:.2} 秒", (ms as f64) / 1000.0))
-                                        .unwrap_or_else(|| "已停用".to_string());
-                                    ui.label(self.localized_owned(
-                                        format!("Timeout: {timeout_desc_en}"),
-                                        format!("逾時：{timeout_desc_zh}"),
-                                    ));
-                                    let kill_desc_en =
-                                        if entry.kill_on_timeout { "yes" } else { "no" };
-                                    let kill_desc_zh =
-                                        if entry.kill_on_timeout { "是" } else { "否" };
-                                    ui.label(self.localized_owned(
-                                        format!("Kill on timeout: {kill_desc_en}"),
-                                        format!("逾時後終止：{kill_desc_zh}"),
-                                    ));
-                                    if entry.result.timed_out {
-                                        ui.colored_label(
-                                            Color32::from_rgb(239, 68, 68),
-                                            self.localized("Timed out", "已逾時"),
-                                        );
-                                    }
-
-                                    egui::CollapsingHeader::new(
-                                        self.localized("stdout", "標準輸出"),
-                                    )
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        if entry.stdout_text.trim().is_empty() {
-                                            ui.label(
-                                                self.localized("No stdout output", "無標準輸出"),
-                                            );
-                                        } else {
-                                            ui.code(entry.stdout_text.clone());
-                                        }
-                                    });
-                                    egui::CollapsingHeader::new(
-                                        self.localized("stderr", "標準錯誤"),
-                                    )
-                                    .default_open(false)
-                                    .show(ui, |ui| {
-                                        if entry.stderr_text.trim().is_empty() {
-                                            ui.label(
-                                                self.localized(
-                                                    "No stderr output",
-                                                    "無標準錯誤輸出",
-                                                ),
-                                            );
-                                        } else {
-                                            ui.code(entry.stderr_text.clone());
-                                        }
-                                    });
-                                });
-                            }
-                        }
-                    }
-                    "notifications" => {
-                        if self.notification_log.is_empty() {
-                            ui.label(self.text("panel.notifications.idle"));
-                        } else {
-                            for entry in self.notification_log.iter() {
-                                ui.label(entry);
-                            }
-                        }
-                        if let Some(font_warning) = &self.font_warning {
-                            ui.separator();
-                            ui.label(font_warning);
-                        } else {
-                            ui.add_space(4.0);
-                            ui.label(self.text("panel.notifications.font_warning"));
-                        }
-                    }
-                    "lsp" => {
-                        if self.lsp_client.is_online() {
-                            ui.label(self.text("panel.lsp.connected"));
-                        } else {
-                            ui.colored_label(
-                                Color32::from_rgb(239, 68, 68),
-                                self.text("panel.lsp.offline").to_string(),
-                            );
-                        }
-                        let diagnostics = self
-                            .lsp_client
-                            .diagnostics(self.current_language_id.as_str());
-                        if diagnostics.is_empty() {
-                            ui.label(self.text("panel.lsp.no_diagnostics"));
-                        } else {
-                            for diagnostic in diagnostics.iter().take(5) {
-                                let color = diagnostic_color(diagnostic.severity);
+        match active_panel.as_str() {
+            "find_results" => {
+                // Intentionally blank until a search populates results.
+            }
+            "console" => {
+                if let Some(error) = &self.run_last_error {
+                    ui.colored_label(Color32::from_rgb(239, 68, 68), format!("{error}"));
+                    ui.separator();
+                }
+                if self.run_history.is_empty() {
+                    ui.label(self.localized("No run history yet", "尚無執行紀錄"));
+                } else {
+                    for entry in self.run_history.iter() {
+                        ui.group(|ui| {
+                            let exit_code = entry
+                                .result
+                                .exit_code
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "signal".to_string());
+                            ui.label(self.localized_owned(
+                                format!(
+                                    "{}\nExit: {} | Duration: {} ms",
+                                    entry.title, exit_code, entry.result.duration_ms
+                                ),
+                                format!(
+                                    "{}\n結束碼：{}｜耗時 {} 毫秒",
+                                    entry.title, exit_code, entry.result.duration_ms
+                                ),
+                            ));
+                            ui.label(self.localized_owned(
+                                format!("Command: {}", entry.command),
+                                format!("指令：{}", entry.command),
+                            ));
+                            let workdir = entry
+                                .working_dir
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "-".to_string());
+                            ui.label(self.localized_owned(
+                                format!("Workdir: {}", workdir),
+                                format!("工作目錄：{}", workdir),
+                            ));
+                            let env_text = if entry.env.is_empty() {
+                                "-".to_string()
+                            } else {
+                                entry
+                                    .env
+                                    .iter()
+                                    .map(|(k, v)| format!("{k}={v}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
+                            ui.label(self.localized_owned(
+                                format!("Env overrides: {}", env_text),
+                                format!("環境覆寫：{}", env_text),
+                            ));
+                            let cleared_en = if entry.cleared_env { "yes" } else { "no" };
+                            let cleared_zh = if entry.cleared_env { "是" } else { "否" };
+                            ui.label(self.localized_owned(
+                                format!("Cleared env: {cleared_en}"),
+                                format!("已清除環境變數：{cleared_zh}"),
+                            ));
+                            let timeout_desc_en = entry
+                                .timeout_ms
+                                .map(|ms| format!("{:.2} s", (ms as f64) / 1000.0))
+                                .unwrap_or_else(|| "disabled".to_string());
+                            let timeout_desc_zh = entry
+                                .timeout_ms
+                                .map(|ms| format!("{:.2} 秒", (ms as f64) / 1000.0))
+                                .unwrap_or_else(|| "已停用".to_string());
+                            ui.label(self.localized_owned(
+                                format!("Timeout: {timeout_desc_en}"),
+                                format!("逾時：{timeout_desc_zh}"),
+                            ));
+                            let kill_desc_en = if entry.kill_on_timeout { "yes" } else { "no" };
+                            let kill_desc_zh = if entry.kill_on_timeout { "是" } else { "否" };
+                            ui.label(self.localized_owned(
+                                format!("Kill on timeout: {kill_desc_en}"),
+                                format!("逾時後終止：{kill_desc_zh}"),
+                            ));
+                            if entry.result.timed_out {
                                 ui.colored_label(
-                                    color,
-                                    format!("[{:?}] {}", diagnostic.severity, diagnostic.message),
+                                    Color32::from_rgb(239, 68, 68),
+                                    self.localized("Timed out", "已逾時"),
                                 );
                             }
-                            if diagnostics.len() > 5 {
-                                let remaining = diagnostics.len() - 5;
-                                ui.label(self.format_indexed(
-                                    "panel.lsp.more_diagnostics",
-                                    &[remaining.to_string()],
-                                ));
-                            }
-                        }
-                    }
-                    other => {
-                        let template = self.text("panel.generic.no_content").into_owned();
-                        ui.label(template.replace("{panel}", other));
+
+                            egui::CollapsingHeader::new(self.localized("stdout", "標準輸出"))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    if entry.stdout_text.trim().is_empty() {
+                                        ui.label(self.localized("No stdout output", "無標準輸出"));
+                                    } else {
+                                        ui.code(entry.stdout_text.clone());
+                                    }
+                                });
+                            egui::CollapsingHeader::new(self.localized("stderr", "標準錯誤"))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    if entry.stderr_text.trim().is_empty() {
+                                        ui.label(self.localized(
+                                            "No stderr output",
+                                            "無標準錯誤輸出",
+                                        ));
+                                    } else {
+                                        ui.code(entry.stderr_text.clone());
+                                    }
+                                });
+                        });
                     }
                 }
-            });
+            }
+            "notifications" => {
+                if self.notification_log.is_empty() {
+                    ui.label(self.text("panel.notifications.idle"));
+                } else {
+                    for entry in self.notification_log.iter() {
+                        ui.label(entry);
+                    }
+                }
+                if let Some(font_warning) = &self.font_warning {
+                    ui.separator();
+                    ui.label(font_warning);
+                } else {
+                    ui.add_space(4.0);
+                    ui.label(self.text("panel.notifications.font_warning"));
+                }
+            }
+            "lsp" => {
+                if self.lsp_client.is_online() {
+                    ui.label(self.text("panel.lsp.connected"));
+                } else {
+                    ui.colored_label(
+                        Color32::from_rgb(239, 68, 68),
+                        self.text("panel.lsp.offline").to_string(),
+                    );
+                }
+                let diagnostics = self
+                    .lsp_client
+                    .diagnostics(self.current_language_id.as_str());
+                if diagnostics.is_empty() {
+                    ui.label(self.text("panel.lsp.no_diagnostics"));
+                } else {
+                    for diagnostic in diagnostics.iter().take(5) {
+                        let color = diagnostic_color(diagnostic.severity);
+                        ui.colored_label(
+                            color,
+                            format!("[{:?}] {}", diagnostic.severity, diagnostic.message),
+                        );
+                    }
+                    if diagnostics.len() > 5 {
+                        let remaining = diagnostics.len() - 5;
+                        ui.label(self.format_indexed(
+                            "panel.lsp.more_diagnostics",
+                            &[remaining.to_string()],
+                        ));
+                    }
+                }
+            }
+            other => {
+                let template = self.text("panel.generic.no_content").into_owned();
+                ui.label(template.replace("{panel}", other));
+            }
+        }
     }
 
-    fn show_status_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status_bar")
-            .resizable(false)
-            .exact_height(24.0)
-            .show(ctx, |ui| {
+    fn render_status_bar_row(&mut self, ui: &mut egui::Ui) -> Rect {
+        let status_height = 24.0;
+        let status_response =
+            ui.allocate_ui(vec2(ui.available_width(), status_height), |ui| {
+                ui.set_min_height(status_height);
                 let palette = &self.palette;
                 ui.painter().rect_filled(
                     ui.max_rect(),
@@ -5421,12 +5401,10 @@ impl RustNotePadApp {
                         ],
                     ));
                     ui.separator();
-                    ui.label(
-                        self.format_indexed(
-                            "status.selection",
-                            &[self.status.selection.to_string()],
-                        ),
-                    );
+                    ui.label(self.format_indexed(
+                        "status.selection",
+                        &[self.status.selection.to_string()],
+                    ));
                     ui.separator();
                     ui.label(self.status.mode);
                     ui.separator();
@@ -5438,17 +5416,40 @@ impl RustNotePadApp {
                         "status.lang_label",
                         &[self.status.document_language.clone()],
                     ));
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.label(
+                            self.format_indexed(
+                                "status.ui_label",
+                                &[self.status.ui_language.clone()],
+                            ),
+                        );
+                        ui.separator();
+                        ui.label(
+                            self.format_indexed("status.theme_label", &[self.status.theme.clone()]),
+                        );
+                        ui.allocate_space(ui.available_size());
+                    });
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    ui.label(
-                        self.format_indexed("status.ui_label", &[self.status.ui_language.clone()]),
-                    );
+        });
+        status_response.response.rect
+    }
+
+    fn show_bottom_region(&mut self, ctx: &egui::Context) {
+        let panel_ids = self.layout.bottom_dock.visible_panels.clone();
+        egui::TopBottomPanel::bottom("bottom_region")
+            .resizable(self.bottom_panels_visible)
+            .min_height(24.0)
+            .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
+            .show(ctx, |ui| {
+                if self.bottom_panels_visible {
+                    ui.vertical(|ui| {
+                        self.render_bottom_dock(ui, &panel_ids);
+                    });
                     ui.separator();
-                    ui.label(
-                        self.format_indexed("status.theme_label", &[self.status.theme.clone()]),
-                    );
-                });
+                }
+                self.render_status_bar_row(ui);
             });
     }
 
@@ -5915,6 +5916,13 @@ impl RustNotePadApp {
         self.run_panel_visible = true;
     }
 
+    fn set_bottom_panels_visible(&mut self, visible: bool) {
+        if self.bottom_panels_visible == visible {
+            return;
+        }
+        self.bottom_panels_visible = visible;
+    }
+
     fn render_sidebar_section<F>(&mut self, ui: &mut egui::Ui, has_previous: &mut bool, render: F)
     where
         F: FnOnce(&mut Self, &mut egui::Ui),
@@ -6095,9 +6103,8 @@ impl App for RustNotePadApp {
         if self.document_map_visible {
             self.show_right_sidebar(ctx);
         }
-        self.show_bottom_dock(ctx);
-        self.show_status_bar(ctx);
         self.show_editor_area(ctx);
+        self.show_bottom_region(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
