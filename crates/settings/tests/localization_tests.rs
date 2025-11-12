@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use rustnotepad_settings::{LocalizationError, LocalizationManager, LocalizationParams};
 use tempfile::tempdir;
@@ -235,5 +236,34 @@ fn load_from_dirs_merges_multiple_sources() {
     assert!(
         codes.iter().any(|code| *code == "ja-JP"),
         "expected ja-JP locale in merged manager, got {codes:?}"
+    );
+}
+
+#[test]
+fn builtin_locales_include_view_toggles() {
+    let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/langs");
+    let manager =
+        LocalizationManager::load_from_dir(&assets_dir, "en-US").expect("load built-in locales");
+    assert_eq!(manager.text("menu.view.status_bar"), "Status Bar");
+    assert!(
+        manager.locale_has_key("zh-TW", "menu.view.status_bar"),
+        "Traditional Chinese locale is missing menu.view.status_bar"
+    );
+    assert!(
+        manager.locale_has_key("zh-TW", "menu.view.bottom_panels"),
+        "Traditional Chinese locale is missing menu.view.bottom_panels"
+    );
+}
+
+#[test]
+fn zh_tw_locale_translates_status_bar() {
+    let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/langs");
+    let mut manager =
+        LocalizationManager::load_from_dir(&assets_dir, "en-US").expect("load built-in locales");
+    assert!(manager.set_active_by_code("zh-TW"), "failed to switch to zh-TW");
+    assert_eq!(
+        manager.text("menu.view.status_bar"),
+        "狀態列",
+        "menu.view.status_bar did not resolve to zh-TW translation"
     );
 }

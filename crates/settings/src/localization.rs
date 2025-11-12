@@ -52,6 +52,7 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ("menu.view.document_map", "Document Map"),
     ("menu.view.function_list", "Function List"),
     ("menu.view.project_panel", "Project Panel ▸"),
+    ("menu.view.status_bar", "Status Bar"),
     ("menu.view.bottom_panels", "Bottom Panels"),
     ("menu.encoding", "Encoding"),
     ("menu.encoding.encode_ansi", "Encode in ANSI"),

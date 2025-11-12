@@ -7,6 +7,7 @@
 - 調整 UI 預設版面：僅保留專案樹、主要編輯分頁、預設預覽區與狀態列，並提供新的「底部面板」檢視切換來顯示/隱藏搜尋結果與主控台，滿足 UI Preview 初始畫面的需求。 / Simplified the default UI layout to show only the project tree, editor tabs, preview pane, and status bar, while adding a “Bottom Panels” view toggle for users who want the find results/console dock.
 - 補充英文/正體中文雙語註解與字串資源，確保日誌、通知與檢視選單皆提供對應翻譯，且 GUI 仍依照使用者設定語系呈現單一語言。 / Expanded bilingual comments and string resources so logs, notifications, and the View menu include both Traditional Chinese and English context, while the GUI continues to render solely in the selected locale.
 - 重新切分底部版面：將底部面板與狀態列收納在單一 `TopBottomPanel`，並確保中央編輯區、側邊欄與狀態列互不遮擋，同時移除暫時性的除錯日誌，保持乾淨的 UI 行為與輸出。 / Refactored the bottom layout so the dock and status bar share one `TopBottomPanel`, ensuring the editor/sidebars never overlap the status bar, and removed temporary debug logging to keep the UI and logs tidy.
+- 修正「檢視 → 狀態列」在 zh-TW 語系仍顯示英文的問題：更新 `assets/langs`、內建 fallback 與 CLI 安裝測試，並新增 `zh_tw_locale_translates_status_bar` 回歸測試確保選單即時顯示「狀態列」。 / Fixed the View → Status Bar menu showing English under the zh-TW locale by aligning `assets/langs`, the fallback catalog, and localization installer tests, plus added the `zh_tw_locale_translates_status_bar` regression test so the menu consistently renders 「狀態列」.
 
 ### 未完成 / Pending
 - 針對其餘歷史註解與文件補齊雙語內容，並擴充自動化測試覆蓋更多 GUI 互動情境。 / Backfill bilingual text across older comments/docs and extend automated coverage for additional GUI interactions.
