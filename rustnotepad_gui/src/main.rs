@@ -82,6 +82,12 @@ use std::os::unix::ffi::OsStrExt;
 use x11rb::xcb_ffi::XCBConnection;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
+const ICON_FONT_NAME: &str = "Font Awesome 7 Free Solid";
+const ICON_XMARK: &str = "\u{f00d}";
+const ICON_FOLDER: &str = "\u{f07b}";
+const ICON_FOLDER_TREE: &str = "\u{f802}";
+const ICON_RELOAD: &str = "\u{f01e}";
+const ICON_FLOPPY: &str = "\u{f0c7}";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
 const PREVIEW_LANGUAGE_ID: &str = "rust";
 
@@ -1320,11 +1326,13 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
             "menu.language",
             &[
                 "menu.language.auto_detect",
-                "menu.language.english",
-                "menu.language.chinese_traditional",
-                "menu.language.japanese",
+                "menu.language.plaintext",
+                "menu.language.c_cpp",
+                "menu.language.python",
+                "menu.language.go",
                 "menu.language.rust",
                 "menu.language.json",
+                "menu.language.markdown",
             ],
         ),
         MenuSection::new(
@@ -1656,6 +1664,7 @@ struct RustNotePadApp {
     preferences_import_path: String,
     preferences_transfer_status: Option<UiMessage>,
     fonts_installed: bool,
+    icon_font_available: bool,
     cjk_font_available: bool,
     font_warning: Option<String>,
     highlight_registry: LanguageRegistry,
@@ -1896,7 +1905,7 @@ impl RustNotePadApp {
         if theme_manager
             .set_active_by_name(&current_preferences.ui.theme)
             .is_none()
-            && current_preferences.ui.theme != "Midnight Indigo"
+            && current_preferences.ui.theme != "Notepad++ Classic"
         {
             log_warn(format!(
                 "Unknown theme in preferences: {}",
@@ -2048,6 +2057,7 @@ impl RustNotePadApp {
             preferences_import_path: String::new(),
             preferences_transfer_status: None,
             fonts_installed: false,
+            icon_font_available: false,
             cjk_font_available: false,
             font_warning: None,
             highlight_registry,
@@ -2107,7 +2117,7 @@ impl RustNotePadApp {
             plugin_win_install_overwrite: false,
             plugin_pending_removal: None,
             view_fullscreen: false,
-            project_panel_visible: true,
+            project_panel_visible: false,
             function_list_visible: true,
             document_map_visible: true,
             bottom_panels_visible: false,
@@ -3140,6 +3150,55 @@ impl RustNotePadApp {
         }
     }
 
+    fn handle_search_command(&mut self, item_key: &str) {
+        match item_key {
+            "menu.search.find" => {
+                self.bottom_panels_visible = true;
+                self.layout.bottom_dock.active_panel = Some("find_results".into());
+                self.push_localized_notification(
+                    "Find dialog invoked (preview).",
+                    "已開啟搜尋（預覽動作）。",
+                );
+            }
+            "menu.search.find_next" => {
+                self.push_localized_notification(
+                    "Find next (preview).",
+                    "尋找下一筆（預覽動作）。",
+                );
+            }
+            "menu.search.find_previous" => {
+                self.push_localized_notification(
+                    "Find previous (preview).",
+                    "尋找上一筆（預覽動作）。",
+                );
+            }
+            "menu.search.replace" => {
+                self.push_localized_notification(
+                    "Replace dialog invoked (preview).",
+                    "已開啟取代（預覽動作）。",
+                );
+            }
+            "menu.search.find_in_files" => {
+                self.bottom_panels_visible = true;
+                self.layout.bottom_dock.active_panel = Some("find_results".into());
+                self.push_localized_notification(
+                    "Find in files (preview).",
+                    "檔案搜尋（預覽動作）。",
+                );
+            }
+            "menu.search.bookmark" => {
+                self.push_localized_notification(
+                    "Bookmark toggle (preview).",
+                    "切換書籤（預覽動作）。",
+                );
+            }
+            _ => log_warn(self.localized_owned(
+                format!("Unsupported search command {item_key}"),
+                format!("未支援的搜尋指令 {item_key}"),
+            )),
+        }
+    }
+
     fn handle_view_command(&mut self, item_key: &str, ctx: Option<&egui::Context>) {
         match item_key {
             "menu.view.toggle_fullscreen" => {
@@ -3286,11 +3345,13 @@ impl RustNotePadApp {
     fn handle_language_command(&mut self, item_key: &str) {
         match item_key {
             "menu.language.auto_detect" => self.auto_detect_language(),
-            "menu.language.english"
-            | "menu.language.chinese_traditional"
-            | "menu.language.japanese" => self.apply_language_selection("plaintext"),
+            "menu.language.plaintext" => self.apply_language_selection("plaintext"),
+            "menu.language.c_cpp" => self.apply_language_selection("cpp"),
+            "menu.language.python" => self.apply_language_selection("python"),
+            "menu.language.go" => self.apply_language_selection("go"),
             "menu.language.rust" => self.apply_language_selection("rust"),
             "menu.language.json" => self.apply_language_selection("json"),
+            "menu.language.markdown" => self.apply_language_selection("markdown"),
             _ => log_warn(self.localized_owned(
                 format!("Unsupported language command {item_key}"),
                 format!("未支援的語言指令 {item_key}"),
@@ -3529,17 +3590,7 @@ impl RustNotePadApp {
             PaneRole::Primary => PaneRole::Secondary,
             PaneRole::Secondary => PaneRole::Primary,
         };
-        let target_idx = self
-            .layout
-            .panes
-            .iter()
-            .position(|pane| pane.role == target_role)
-            .ok_or_else(|| {
-                self.localized_owned(
-                    "Secondary view is unavailable.".to_string(),
-                    "找不到另一個檢視窗格。".to_string(),
-                )
-            })?;
+        let target_idx = self.ensure_pane_exists(target_role);
         let target_pane = &mut self.layout.panes[target_idx];
         if !target_pane.tabs.iter().any(|tab| tab.id == template.id) {
             target_pane.tabs.push(template);
@@ -3561,17 +3612,7 @@ impl RustNotePadApp {
             PaneRole::Primary => PaneRole::Secondary,
             PaneRole::Secondary => PaneRole::Primary,
         };
-        let target_idx = self
-            .layout
-            .panes
-            .iter()
-            .position(|pane| pane.role == target_role)
-            .ok_or_else(|| {
-                self.localized_owned(
-                    "Secondary view is unavailable.".to_string(),
-                    "找不到另一個檢視窗格。".to_string(),
-                )
-            })?;
+        let target_idx = self.ensure_pane_exists(target_role);
 
         {
             let source_pane = &mut self.layout.panes[source_idx];
@@ -3590,6 +3631,16 @@ impl RustNotePadApp {
 
         self.status.refresh_from_layout(&self.layout);
         Ok(())
+    }
+
+    fn ensure_pane_exists(&mut self, role: PaneRole) -> usize {
+        if let Some(index) = self.layout.panes.iter().position(|pane| pane.role == role) {
+            return index;
+        }
+        self.layout
+            .panes
+            .push(PaneLayout::new(role, Vec::new(), None));
+        self.layout.panes.len() - 1
     }
 
     fn perform_undo(&mut self) {
@@ -4850,17 +4901,31 @@ impl RustNotePadApp {
         visuals.panel_fill = color32_from_color(self.palette.panel);
         visuals.window_fill = color32_from_color(self.palette.panel);
         visuals.extreme_bg_color = color32_from_color(self.palette.background);
+        let soft_rounding = egui::Rounding::same(2.0);
+        visuals.window_rounding = soft_rounding;
+        visuals.widgets.noninteractive.rounding = soft_rounding;
+        visuals.widgets.inactive.rounding = soft_rounding;
+        visuals.widgets.hovered.rounding = soft_rounding;
+        visuals.widgets.active.rounding = soft_rounding;
         visuals.widgets.inactive.bg_fill = color32_from_color(self.palette.panel);
         visuals.widgets.inactive.fg_stroke.color = color32_from_color(self.palette.editor_text);
         visuals.widgets.hovered.bg_fill = color32_from_color(self.palette.accent);
         visuals.widgets.active.bg_fill = color32_from_color(self.palette.accent);
         visuals.widgets.active.fg_stroke.color = color32_from_color(self.palette.accent_text);
+        visuals.selection.bg_fill = Color32::from_rgb(202, 220, 255);
+        visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(153, 187, 238));
+        visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, Color32::from_rgb(200, 200, 200));
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style()).clone();
         style.visuals.override_text_color = Some(color32_from_color(self.palette.editor_text));
         style.visuals.faint_bg_color = color32_from_color(self.palette.background);
         style.visuals.hyperlink_color = color32_from_color(self.palette.accent);
+        style.spacing.item_spacing = vec2(8.0, 6.0);
+        style.spacing.button_padding = vec2(6.0, 4.0);
+        style.spacing.menu_margin = Margin::symmetric(6.0, 4.0);
+        style.spacing.indent = 14.0;
         style.text_styles.insert(
             TextStyle::Body,
             FontId::new(definition.fonts.ui_size as f32, FontFamily::Proportional),
@@ -4885,12 +4950,53 @@ impl RustNotePadApp {
         self.status.set_theme(&definition.name);
     }
 
+    fn icon_text(&self, icon: &str, size: f32) -> RichText {
+        if self.icon_font_available {
+            RichText::new(icon)
+                .family(FontFamily::Name(ICON_FONT_NAME.into()))
+                .size(size)
+        } else {
+            RichText::new(icon).family(FontFamily::Proportional).size(size)
+        }
+    }
+
+    fn icon_button(&self, ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
+        let size = self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0;
+        ui.add(egui::Button::new(self.icon_text(icon, size)).frame(false))
+            .on_hover_text(tooltip)
+    }
+
     fn ensure_fonts(&mut self, ctx: &egui::Context) {
         if self.fonts_installed {
             return;
         }
 
         let mut definitions = FontDefinitions::default();
+        if let Some((name, data)) = load_icon_font() {
+            definitions
+                .font_data
+                .insert(name.clone(), FontData::from_owned(data));
+            definitions
+                .families
+                .entry(FontFamily::Name(name.clone().into()))
+                .or_default()
+                .insert(0, name.clone());
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
+                family.insert(0, name.clone());
+            }
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
+                family.insert(0, name.clone());
+            }
+            self.icon_font_available = true;
+            log_info(format!(
+                "Loaded icon font '{name}' ({} bytes)",
+                definitions
+                    .font_data
+                    .get(&name)
+                    .map(|d| d.font.len())
+                    .unwrap_or(0)
+            ));
+        }
         if let Some((name, data)) = load_cjk_font() {
             definitions
                 .font_data
@@ -4916,18 +5022,38 @@ impl RustNotePadApp {
         }
 
         ctx.set_fonts(definitions);
+        if self.icon_font_available {
+            let has_icon_family =
+                ctx.fonts(|f| f.families().contains(&FontFamily::Name(ICON_FONT_NAME.into())));
+            if !has_icon_family {
+                log_warn(format!(
+                    "Icon font family '{}' missing after registration; falling back to text icons.",
+                    ICON_FONT_NAME
+                ));
+                self.icon_font_available = false;
+            }
+        }
         self.fonts_installed = true;
     }
 
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar")
             .resizable(false)
+            .frame(
+                egui::Frame::none()
+                    .fill(color32_from_color(self.palette.panel))
+                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(204, 204, 204))),
+            )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.spacing_mut().button_padding = vec2(6.0, 2.5);
                 ui.horizontal(|ui| {
                     for section in MENU_STRUCTURE.iter() {
                         let title = self.text(section.title_key).into_owned();
                         ui.menu_button(title, |ui| {
                             let is_settings = section.title_key == "menu.settings";
+                            let is_search = section.title_key == "menu.search";
                             let is_macro = section.title_key == "menu.macro";
                             let is_run = section.title_key == "menu.run";
                             let is_file = section.title_key == "menu.file";
@@ -4944,6 +5070,11 @@ impl RustNotePadApp {
                                 if is_settings {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_settings_command(item_key);
+                                        ui.close_menu();
+                                    }
+                                } else if is_search {
+                                    if ui.button(label.clone()).clicked() {
+                                        self.handle_search_command(item_key);
                                         ui.close_menu();
                                     }
                                 } else if is_macro {
@@ -5014,31 +5145,68 @@ impl RustNotePadApp {
     fn show_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
             .resizable(false)
-            .exact_height(38.0)
+            .exact_height(32.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(color32_from_color(self.palette.panel))
+                    .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(204, 204, 204))),
+            )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().button_padding = vec2(6.0, 3.0);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let workspace_label = format!(
-                        "{}: {}",
-                        self.text("toolbar.workspace_prefix"),
-                        self.workspace_display_name()
-                    );
-                    ui.label(RichText::new(workspace_label).strong());
-                    ui.separator();
-                    let mut ratio = self.layout.split_ratio;
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut ratio, 0.3..=0.7)
-                                .prefix(self.text("toolbar.split_prefix").to_string())
-                                .show_value(false),
-                        )
-                        .changed()
-                    {
-                        if let Ok(valid) = LayoutConfig::validate_split_ratio(ratio) {
-                            self.layout.split_ratio = valid;
+                    if self.project_panel_visible {
+                        let workspace_label = format!(
+                            "{}: {}",
+                            self.text("toolbar.workspace_prefix"),
+                            self.workspace_display_name()
+                        );
+                        ui.label(RichText::new(workspace_label).strong());
+                        ui.separator();
+
+                        let mut ratio = self.layout.split_ratio;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut ratio, 0.3..=0.7)
+                                    .prefix(self.text("toolbar.split_prefix").to_string())
+                                    .show_value(false),
+                            )
+                            .changed()
+                        {
+                            if let Ok(valid) = LayoutConfig::validate_split_ratio(ratio) {
+                                self.layout.split_ratio = valid;
+                            }
                         }
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let toggle_icon = if self.project_panel_visible {
+                            ICON_FOLDER_TREE
+                        } else {
+                            ICON_FOLDER
+                        };
+                        if self
+                            .icon_button(
+                                ui,
+                                toggle_icon,
+                                &self.localized("Toggle file tree", "切換檔案清單"),
+                            )
+                            .clicked()
+                        {
+                            self.project_panel_visible = !self.project_panel_visible;
+                            if self.project_panel_visible {
+                                self.push_localized_notification(
+                                    "Project panel visible.",
+                                    "專案面板已顯示。",
+                                );
+                            } else {
+                                self.push_localized_notification(
+                                    "Project panel hidden.",
+                                    "專案面板已隱藏。",
+                                );
+                            }
+                        }
                         let pinned_count = self.layout.pinned_tabs().len();
                         ui.label(
                             self.format_indexed("toolbar.pinned_tabs", &[pinned_count.to_string()]),
@@ -5058,17 +5226,42 @@ impl RustNotePadApp {
     }
 
     fn show_left_sidebar(&mut self, ctx: &egui::Context) {
+        if !self.project_panel_visible {
+            return;
+        }
         egui::SidePanel::left("project_panel")
             .default_width(220.0)
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading(self.text("panel.project.title"));
+                    ui.horizontal(|ui| {
+                        ui.heading(self.text("panel.project.title"));
+                        ui.allocate_ui_with_layout(
+                            ui.available_size(),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                if self
+                                    .icon_button(
+                                        ui,
+                                        ICON_XMARK,
+                                        &self.localized("Hide project panel", "關閉專案面板"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.project_panel_visible = false;
+                                }
+                            },
+                        );
+                    });
                     ui.separator();
-                    if ui
-                        .button(self.localized("Reload Tree", "重新載入專案樹"))
-                        .on_hover_text(
-                            self.localized("Reload project tree from disk", "從磁碟重新載入專案樹"),
+                    if self
+                        .icon_button(
+                            ui,
+                            ICON_RELOAD,
+                            &self.localized(
+                                "Reload project tree from disk",
+                                "從磁碟重新載入專案樹",
+                            ),
                         )
                         .clicked()
                     {
@@ -5082,26 +5275,23 @@ impl RustNotePadApp {
                             "專案樹已重新整理".to_string(),
                         ));
                     }
-                    if ui
-                        .button(self.localized("Save Session", "儲存工作階段"))
-                        .on_hover_text(
-                            self.localized("Flush session snapshot to disk", "將工作階段寫入磁碟"),
+                    if self
+                        .icon_button(
+                            ui,
+                            ICON_FLOPPY,
+                            &self.localized(
+                                "Flush session snapshot to disk",
+                                "將工作階段寫入磁碟",
+                            ),
                         )
                         .clicked()
                     {
                         self.persist_session();
                     }
                     ui.add_space(6.0);
-                    if self.project_panel_visible {
-                        let root_children = self.project_tree.root.children.clone();
-                        for child in root_children.iter() {
-                            self.render_project_node(ui, child, 0);
-                        }
-                    } else {
-                        ui.label(self.localized(
-                            "Project panel hidden via View menu.",
-                            "專案面板已透過檢視選單隱藏。",
-                        ));
+                    let root_children = self.project_tree.root.children.clone();
+                    for child in root_children.iter() {
+                        self.render_project_node(ui, child, 0);
                     }
                     let has_document = !self.editor_preview.trim().is_empty();
                     let mut optional_sections_rendered = false;
@@ -5389,9 +5579,13 @@ impl RustNotePadApp {
                     0.0,
                     color32_from_color(palette.status_bar),
                 );
+                ui.painter().line_segment(
+                    [ui.min_rect().left_top(), ui.min_rect().right_top()],
+                    egui::Stroke::new(1.0, Color32::from_rgb(190, 190, 190)),
+                );
 
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     ui.label(self.format_indexed(
                         "status.position",
                         &[
@@ -5418,7 +5612,7 @@ impl RustNotePadApp {
                     ));
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         ui.label(
                             self.format_indexed(
                                 "status.ui_label",
@@ -5939,14 +6133,50 @@ impl RustNotePadApp {
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let active_id = pane.active.as_deref();
-                for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
-                    self.render_tab_button(ui, pane.role, active_id, tab);
-                }
-                for tab in pane.tabs.iter().filter(|tab| !tab.is_pinned) {
-                    self.render_tab_button(ui, pane.role, active_id, tab);
+        let total_width = ui.available_width();
+        let close_button_width = 28.0;
+        let tabs_width = (total_width - close_button_width - 6.0).max(0.0);
+        ui.horizontal(|ui| {
+            ui.set_width(tabs_width);
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let active_id = pane.active.as_deref();
+                    for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
+                        self.render_tab_button(ui, pane.role, active_id, tab);
+                    }
+                    for tab in pane.tabs.iter().filter(|tab| !tab.is_pinned) {
+                        self.render_tab_button(ui, pane.role, active_id, tab);
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let active_tab = pane
+                    .active
+                    .as_deref()
+                    .and_then(|id| pane.tabs.iter().find(|tab| tab.id == id));
+                let can_close = active_tab
+                    .map(|tab| !tab.is_pinned && !tab.is_locked)
+                    .unwrap_or(false);
+                if let Some(tab) = active_tab {
+                    let tab_id = tab.id.clone();
+                    ui.set_width(close_button_width);
+                    ui.add_space(4.0);
+                    let close = egui::Button::new(self.icon_text(
+                        ICON_XMARK,
+                        self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0,
+                    ))
+                    .frame(false)
+                    .min_size(vec2(22.0, 20.0));
+                    let close = ui
+                        .add_enabled(can_close, close)
+                        .on_hover_text(self.text("tabs.close_hover").to_string());
+                    if close.clicked() {
+                        self.close_tab(pane.role, &tab_id);
+                    }
+                } else {
+                    ui.set_width(close_button_width);
                 }
             });
         });
@@ -5955,7 +6185,7 @@ impl RustNotePadApp {
     fn render_tab_button(
         &mut self,
         ui: &mut egui::Ui,
-        role: PaneRole,
+        _role: PaneRole,
         active_id: Option<&str>,
         tab: &TabView,
     ) {
@@ -5991,17 +6221,6 @@ impl RustNotePadApp {
             if ui.add(button).clicked() {
                 if self.activate_tab(&tab.id) {
                     self.status.refresh_from_layout(&self.layout);
-                }
-            }
-
-            if !tab.is_pinned && !tab.is_locked {
-                let close = egui::Button::new(RichText::new("✕").small()).frame(false);
-                if ui
-                    .add(close)
-                    .on_hover_text(self.text("tabs.close_hover").to_string())
-                    .clicked()
-                {
-                    self.close_tab(role, &tab.id);
                 }
             }
         });
@@ -7192,6 +7411,35 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
         }
     }
     log_warn("No CJK font found; Traditional Chinese UI may require manual font install");
+    None
+}
+
+fn load_icon_font() -> Option<(String, Vec<u8>)> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.push(
+        manifest_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"),
+    );
+    candidates.push(
+        manifest_dir.join("../assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"),
+    );
+    candidates.push(PathBuf::from(
+        "assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf",
+    ));
+    if let Some(exe_dir) = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+        candidates.push(exe_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"));
+        candidates.push(
+            exe_dir
+                .parent()
+                .map(|p| p.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"))
+                .unwrap_or_else(|| exe_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf")),
+        );
+    }
+    for path in candidates {
+        if let Ok(data) = fs::read(&path) {
+            return Some((ICON_FONT_NAME.to_string(), data));
+        }
+    }
     None
 }
 

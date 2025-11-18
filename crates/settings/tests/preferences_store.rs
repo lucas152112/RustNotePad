@@ -11,7 +11,7 @@ fn load_missing_file_returns_defaults() {
     assert!(store.preferences().editor.autosave_enabled);
     assert_eq!(store.preferences().editor.autosave_interval_minutes, 5);
     assert_eq!(store.preferences().ui.locale, "en-US");
-    assert_eq!(store.preferences().ui.theme, "Midnight Indigo");
+    assert_eq!(store.preferences().ui.theme, "Notepad++ Classic");
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn overwrite_replaces_existing_values() {
     let current = store.preferences();
     assert_eq!(current.editor.autosave_interval_minutes, 5);
     assert!(!current.editor.show_line_numbers);
-    assert_eq!(current.ui.theme, "Midnight Indigo");
+    assert_eq!(current.ui.theme, "Notepad++ Classic");
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn legacy_version_is_upgraded_on_load() {
         "autosave interval should fall back to default when legacy data is zero"
     );
     assert_eq!(
-        prefs.ui.theme, "Midnight Indigo",
+        prefs.ui.theme, "Notepad++ Classic",
         "empty theme should fall back to default"
     );
     assert_eq!(

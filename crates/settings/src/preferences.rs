@@ -127,7 +127,7 @@ fn default_locale() -> String {
 }
 
 fn default_theme() -> String {
-    "Midnight Indigo".to_string()
+    "Notepad++ Classic".to_string()
 }
 
 impl Default for UiPreferences {

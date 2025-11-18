@@ -3317,6 +3317,8 @@ dependencies = [
  "rustnotepad_settings",
  "serde_json",
  "tempfile",
+ "wayland-client",
+ "x11rb",
 ]
 
 [[package]]

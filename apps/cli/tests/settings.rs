@@ -121,7 +121,7 @@ fn preferences_import_and_export() -> Result<(), Box<dyn Error>> {
             },
             "ui": {
                 "locale": "en-US",
-                "theme": "Midnight Indigo"
+                "theme": "Notepad++ Classic"
             }
         }"#,
     )?;

@@ -1,0 +1,42 @@
+{
+  "name": "Notepad++ Classic",
+  "description": "Light Windows-style palette inspired by default Notepad++",
+  "kind": "light",
+  "palette": {
+    "background": "#E7E7E7",
+    "panel": "#F2F2F2",
+    "accent": "#4A90E2",
+    "accent_text": "#FFFFFF",
+    "editor_background": "#FFFFFF",
+    "editor_text": "#111111",
+    "status_bar": "#D4D0C8"
+  },
+  "fonts": {
+    "ui_family": "Segoe UI",
+    "ui_size": 14,
+    "editor_family": "Consolas",
+    "editor_size": 13
+  },
+  "syntax": {
+    "keyword": {
+      "foreground": "#0000BB",
+      "bold": true
+    },
+    "string": {
+      "foreground": "#008000"
+    },
+    "comment": {
+      "foreground": "#808080",
+      "italic": true
+    },
+    "number": {
+      "foreground": "#800080"
+    },
+    "operator": {
+      "foreground": "#0000BB"
+    },
+    "identifier": {
+      "foreground": "#000000"
+    }
+  }
+}

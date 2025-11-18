@@ -1,5 +1,12 @@
 # Develop Diary / 開發日誌
 
+## 2025-11-18
+
+### 完成 / Completed
+- 新增 Notepad++ 風格佈景 `Notepad++ Classic` 並調整 egui 外觀（工具列/選單/狀態列框線、圓角與選取色），讓預設 UI 更貼近參考截圖；設定預設主題與偏好預設值，並修正相依測試。 / Added the Notepad++ Classic theme and retuned egui chrome (toolbar/menu/status bar framing, rounding, selection colors) to align with the reference shots; set it as the default theme with updated prefs and tests.
+- 導入 FontAwesome 圖示字型並將工具列、標籤列關閉鍵、專案面板快捷等改為圖示化顯示；在字型缺失時自動回退避免 panic。 / Integrated FontAwesome icon font and switched toolbar/tree/tabs close controls to icons, with graceful fallback when the font is unavailable.
+- 語法選單文案改為「程式語言／語法」，選項列出程式語言與文件格式（Auto, Plain Text, C/C++, Python, Go, Rust, JSON, Markdown）並更新狀態列標籤。 / Renamed the Language menu to “Language / Syntax,” listing real languages/formats (Auto, Plain Text, C/C++, Python, Go, Rust, JSON, Markdown) and updated the status bar label accordingly.
+
 ## 2025-11-12
 
 ### 完成 / Completed

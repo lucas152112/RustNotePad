@@ -165,36 +165,12 @@ impl LayoutConfig {
             },
         ];
 
-        let secondary_tabs = vec![
-            TabView {
-                id: "tests/search_workflow.rs".into(),
-                title: "search_workflow.rs".into(),
-                language: Some("Rust".into()),
-                is_pinned: true,
-                is_locked: true,
-                color: Some(TabColorTag::Green),
-            },
-            TabView {
-                id: "docs/feature_parity/03-search-replace/design.md".into(),
-                title: "design.md".into(),
-                language: Some("Markdown".into()),
-                is_pinned: false,
-                is_locked: false,
-                color: Some(TabColorTag::Orange),
-            },
-        ];
-
         Self {
             panes: vec![
                 PaneLayout::new(
                     PaneRole::Primary,
                     primary_tabs,
                     Some("search/src/lib.rs".into()),
-                ),
-                PaneLayout::new(
-                    PaneRole::Secondary,
-                    secondary_tabs,
-                    Some("docs/feature_parity/03-search-replace/design.md".into()),
                 ),
             ],
             bottom_dock: DockLayout {
@@ -530,7 +506,6 @@ mod tests {
         let layout = LayoutConfig::default();
         let pinned: Vec<_> = layout.pinned_tabs();
         assert!(!pinned.is_empty());
-        assert!(pinned.iter().any(|tab| tab.is_locked));
     }
 
     #[test]
