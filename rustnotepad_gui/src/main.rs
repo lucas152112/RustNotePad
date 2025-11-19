@@ -1580,6 +1580,7 @@ struct StatusBarState {
     line: usize,
     column: usize,
     lines: usize,
+    length: usize,
     selection: usize,
     encoding: &'static str,
     eol: &'static str,
@@ -1587,6 +1588,7 @@ struct StatusBarState {
     document_language: String,
     ui_language: String,
     theme: String,
+    caret_char_index: usize,
 }
 
 impl StatusBarState {
@@ -1595,13 +1597,15 @@ impl StatusBarState {
             line: 1,
             column: 1,
             lines: 1,
+            length: 0,
             selection: 0,
             encoding: "UTF-8",
-            eol: "LF",
+            eol: "Windows (CR LF)",
             mode: "INS",
             document_language: "Plain Text".into(),
             ui_language: locale.to_string(),
             theme: theme.to_string(),
+            caret_char_index: 0,
         };
         state.refresh_from_layout(layout);
         state
@@ -1617,12 +1621,36 @@ impl StatusBarState {
     }
 
     fn refresh_cursor(&mut self, contents: &str) {
-        let lines_iter = contents.lines();
-        let total_lines = lines_iter.clone().count().max(1);
-        let last_line = lines_iter.last().unwrap_or_default();
-        self.line = total_lines;
-        self.lines = total_lines;
-        self.column = last_line.chars().count().saturating_add(1);
+        self.length = contents.chars().count();
+        self.lines = contents.split('\n').count().max(1);
+        let caret_index = self.caret_char_index.min(self.length);
+        let (line, column) = Self::line_column_from_index(contents, caret_index);
+        self.line = line;
+        self.column = column;
+    }
+
+    fn set_caret_index(&mut self, contents: &str, char_index: usize) {
+        self.caret_char_index = char_index;
+        self.refresh_cursor(contents);
+    }
+
+    fn line_column_from_index(contents: &str, char_index: usize) -> (usize, usize) {
+        let mut line = 1;
+        let mut column = 1;
+        let mut current_index = 0;
+        for ch in contents.chars() {
+            if current_index == char_index {
+                return (line, column);
+            }
+            if ch == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+            current_index += 1;
+        }
+        (line, column)
     }
 
     fn set_theme(&mut self, theme_name: &str) {
@@ -2630,15 +2658,12 @@ impl RustNotePadApp {
     fn apply_caret_position(&mut self, line: Option<u32>, column: Option<u32>) {
         let (char_index, resolved_line, resolved_column) =
             Self::compute_char_position(&self.editor_preview, line, column);
-        let total_lines = self.editor_preview.lines().count().max(1);
         self.pending_editor_selection = Some(CCursorRange::one(CCursor::new(char_index)));
         if let Some(pending) = self.pending_editor_selection.take() {
             self.update_editor_selection(Some(pending));
         }
         self.status.line = resolved_line;
         self.status.column = resolved_column;
-        self.status.lines = total_lines;
-        self.status.selection = 0;
     }
 
     fn compute_char_position(
@@ -4217,6 +4242,9 @@ impl RustNotePadApp {
             .editor_selection_char_range()
             .map(|(start, end)| end.saturating_sub(start))
             .unwrap_or(0);
+        let caret_index = self.current_caret_char_index();
+        self.status
+            .set_caret_index(&self.editor_preview, caret_index);
     }
 
     fn editor_selection_char_range(&self) -> Option<(usize, usize)> {
@@ -4835,7 +4863,6 @@ impl RustNotePadApp {
         self.status.refresh_cursor(&self.editor_preview);
         self.status
             .set_document_language(self.language_display_name(&language_id));
-        self.status.selection = 0;
         self.refresh_completions();
     }
 
@@ -5585,46 +5612,39 @@ impl RustNotePadApp {
                 );
 
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.label(self.status.document_language.clone());
+                    ui.separator();
                     ui.label(self.format_indexed(
-                        "status.position",
+                        "status.length_lines",
                         &[
-                            self.status.line.to_string(),
-                            self.status.column.to_string(),
+                            self.status.length.to_string(),
                             self.status.lines.to_string(),
                         ],
                     ));
                     ui.separator();
                     ui.label(self.format_indexed(
-                        "status.selection",
-                        &[self.status.selection.to_string()],
+                        "status.position_short",
+                        &[
+                            self.status.line.to_string(),
+                            self.status.column.to_string(),
+                            self.status.selection.to_string(),
+                        ],
                     ));
-                    ui.separator();
-                    ui.label(self.status.mode);
-                    ui.separator();
-                    ui.label(self.status.encoding);
-                    ui.separator();
-                    ui.label(self.status.eol);
-                    ui.separator();
-                    ui.label(self.format_indexed(
-                        "status.lang_label",
-                        &[self.status.document_language.clone()],
-                    ));
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.label(
-                            self.format_indexed(
-                                "status.ui_label",
-                                &[self.status.ui_language.clone()],
-                            ),
-                        );
-                        ui.separator();
-                        ui.label(
-                            self.format_indexed("status.theme_label", &[self.status.theme.clone()]),
-                        );
-                        ui.allocate_space(ui.available_size());
-                    });
+                    ui.add_space(6.0);
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.label(self.status.mode);
+                            ui.separator();
+                            ui.label(self.status.encoding);
+                            ui.separator();
+                            ui.label(self.status.eol);
+                            ui.allocate_space(ui.available_size());
+                        },
+                    );
                 });
         });
         status_response.response.rect
@@ -5812,9 +5832,7 @@ impl RustNotePadApp {
                         .on_hover_text(self.text("function.navigate_hover").to_string())
                         .clicked()
                     {
-                        self.status.line = line;
-                        self.status.column = 1;
-                        self.status.selection = 0;
+                        self.apply_caret_position(Some(line as u32), Some(1));
                     }
                 }
                 if entries.len() > 10 {

@@ -145,6 +145,11 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ("autocomplete.apply_hover", "Apply suggestion"),
     ("status.position", "Ln {0}, Col {1} | Lines {2}"),
     ("status.selection", "Sel {0}"),
+    ("status.length_lines", "length : {0}    lines : {1}"),
+    (
+        "status.position_short",
+        "Ln : {0}    Col : {1}    Sel : {2} |",
+    ),
     ("status.lang_label", "Lang: {0}"),
     ("status.ui_label", "UI: {0}"),
     ("status.theme_label", "Theme: {0}"),

@@ -3,6 +3,7 @@
 ## 2025-11-18
 
 ### 完成 / Completed
+- 調整狀態列資料模型與佈局：新增字元/行數統計與游標位置同步邏輯，並依 Notepad++ 排列顯示「語言、長度、行列、選取、EOL、編碼、INS」，同時補齊中英文字串與測試，讓 UI 與參考截圖一致。 / Rebuilt the status bar state/layout with live char/line metrics and caret tracking so it now mirrors Notepad++ (language, length, Ln/Col/Sel, EOL, encoding, INS), plus refreshed the en/zh localization strings and tests to keep the UI aligned with the reference shot.
 - 新增 Notepad++ 風格佈景 `Notepad++ Classic` 並調整 egui 外觀（工具列/選單/狀態列框線、圓角與選取色），讓預設 UI 更貼近參考截圖；設定預設主題與偏好預設值，並修正相依測試。 / Added the Notepad++ Classic theme and retuned egui chrome (toolbar/menu/status bar framing, rounding, selection colors) to align with the reference shots; set it as the default theme with updated prefs and tests.
 - 導入 FontAwesome 圖示字型並將工具列、標籤列關閉鍵、專案面板快捷等改為圖示化顯示；在字型缺失時自動回退避免 panic。 / Integrated FontAwesome icon font and switched toolbar/tree/tabs close controls to icons, with graceful fallback when the font is unavailable.
 - 語法選單文案改為「程式語言／語法」，選項列出程式語言與文件格式（Auto, Plain Text, C/C++, Python, Go, Rust, JSON, Markdown）並更新狀態列標籤。 / Renamed the Language menu to “Language / Syntax,” listing real languages/formats (Auto, Plain Text, C/C++, Python, Go, Rust, JSON, Markdown) and updated the status bar label accordingly.
