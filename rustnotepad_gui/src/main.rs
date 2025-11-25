@@ -5371,12 +5371,30 @@ impl RustNotePadApp {
             });
     }
 
-    fn show_right_sidebar(&self, ctx: &egui::Context) {
+    fn show_right_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("document_map")
             .default_width(180.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading(self.text("panel.document_map.title"));
+                ui.horizontal(|ui| {
+                    ui.heading(self.text("panel.document_map.title"));
+                    ui.allocate_ui_with_layout(
+                        ui.available_size(),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            if self
+                                .icon_button(
+                                    ui,
+                                    ICON_XMARK,
+                                    &self.localized("Hide document map", "關閉視圖面板"),
+                                )
+                                .clicked()
+                            {
+                                self.document_map_visible = false;
+                            }
+                        },
+                    );
+                });
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(ui.available_height())

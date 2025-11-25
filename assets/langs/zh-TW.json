@@ -89,7 +89,7 @@
     "panel.secondary.title": "次要檢視（預覽）",
     "panel.secondary.active": "作用中：{0}",
     "panel.secondary.readonly": "預覽模式為唯讀。",
-    "panel.document_map.title": "文件地圖",
+    "panel.document_map.title": "視圖",
     "panel.no_panels_configured": "尚未設定任何面板。",
     "panel.find_results.title": "搜尋結果",
     "panel.find_results.summary": "搜尋結果：跨 3 個檔案共 5 筆。",
