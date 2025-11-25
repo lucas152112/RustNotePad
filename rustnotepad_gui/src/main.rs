@@ -1576,8 +1576,6 @@ impl UserProfileStore {
     }
 }
 
-const STATUS_BAR_HEIGHT: f32 = 24.0;
-
 struct StatusBarState {
     line: usize,
     column: usize,
@@ -5616,9 +5614,10 @@ impl RustNotePadApp {
     }
 
     fn render_status_bar_row(&mut self, ui: &mut egui::Ui) -> Rect {
+        let status_height = 24.0;
         let status_response =
-            ui.allocate_ui(vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
-                ui.set_min_height(STATUS_BAR_HEIGHT);
+            ui.allocate_ui(vec2(ui.available_width(), status_height), |ui| {
+                ui.set_min_height(status_height);
                 let palette = &self.palette;
                 ui.painter().rect_filled(
                     ui.max_rect(),
@@ -5669,31 +5668,34 @@ impl RustNotePadApp {
         status_response.response.rect
     }
 
-    fn show_bottom_region(&mut self, ctx: &egui::Context) {
-        let panel_ids = self.layout.bottom_dock.visible_panels.clone();
-        egui::TopBottomPanel::bottom("bottom_region")
-            .resizable(self.bottom_panels_visible)
-            .min_height(STATUS_BAR_HEIGHT)
+    fn show_status_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status_bar")
+            .resizable(false)
+            .exact_height(24.0)
             .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
-                if self.bottom_panels_visible {
-                    ui.vertical(|ui| {
-                        self.render_bottom_dock(ui, &panel_ids);
-                    });
-                    ui.separator();
-                }
                 self.render_status_bar_row(ui);
             });
     }
 
+    fn show_bottom_dock(&mut self, ctx: &egui::Context) {
+        if !self.bottom_panels_visible {
+            return;
+        }
+        let panel_ids = self.layout.bottom_dock.visible_panels.clone();
+        egui::TopBottomPanel::bottom("bottom_dock")
+            .resizable(true)
+            .min_height(120.0)
+            .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    self.render_bottom_dock(ui, &panel_ids);
+                });
+            });
+    }
+
     fn show_editor_area(&mut self, ctx: &egui::Context) {
-        let central_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(Margin {
-            left: 0.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: STATUS_BAR_HEIGHT,
-        });
-        egui::CentralPanel::default().frame(central_frame).show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             let primary_snapshot = self
                 .layout
                 .panes
@@ -6361,7 +6363,8 @@ impl App for RustNotePadApp {
 
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
-        self.show_bottom_region(ctx);
+        self.show_status_bar(ctx);
+        self.show_bottom_dock(ctx);
         self.show_left_sidebar(ctx);
         if self.document_map_visible {
             self.show_right_sidebar(ctx);

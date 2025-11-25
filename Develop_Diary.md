@@ -7,6 +7,7 @@
 - 文件地圖面板改名為「視圖」，並新增關閉按鈕讓使用者能快速收合右側視圖，避免干擾主要編輯區。 / Renamed the Document Map panel to “View” and added a close button so users can quickly dismiss the right-side view without affecting the main editor.
 - 調整底部佈局呈現順序，確保主編輯區在開啟/編輯文件時不會再蓋住狀態列，狀態列永遠保留在最下方。 / Reordered the bottom layout so the editor/content can no longer cover the status bar when opening or editing documents, keeping the bar pinned to the bottom at all times.
 - 在中央主面板加入狀態列高度的內邊距，雙重保障編輯器與文件預覽不會越界覆蓋底部狀態列。 / Added bottom padding equal to the status bar height in the central panel to guarantee editors and previews cannot overflow onto the status bar.
+- 再次拆分底部佈局：狀態列獨立固定在最底，底部停靠區僅在顯示時占用其上方空間，並將編輯器佈局限制在剩餘主面板內，避免任何視窗覆蓋狀態列。 / Re-split the bottom layout so the status bar is fixed at the very bottom, the bottom dock only consumes space above it when visible, and the editor is constrained to the remaining central area to prevent overlap.
 
 ## 2025-11-18
 
