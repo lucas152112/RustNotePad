@@ -1,5 +1,10 @@
 # Develop Diary / 開發日誌
 
+## 2025-11-25
+
+### 完成 / Completed
+- 將狀態列獨立為固定底部面板，與底部停靠區分離並在主視圖佈局前先保留高度，避免檔案清單、文件視窗或其他面板遮蓋狀態列，確保主 panel 的所有操作只在其範圍內呈現。 / Split the status bar into its own fixed bottom panel and lay it out before the main areas so file lists, document views, or bottom docks can no longer overlap it; the main panel now always renders within its own bounds.
+
 ## 2025-11-18
 
 ### 完成 / Completed

@@ -5650,20 +5650,29 @@ impl RustNotePadApp {
         status_response.response.rect
     }
 
-    fn show_bottom_region(&mut self, ctx: &egui::Context) {
+    fn show_status_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status_bar")
+            .resizable(false)
+            .exact_height(24.0)
+            .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
+            .show(ctx, |ui| {
+                self.render_status_bar_row(ui);
+            });
+    }
+
+    fn show_bottom_dock(&mut self, ctx: &egui::Context) {
+        if !self.bottom_panels_visible {
+            return;
+        }
         let panel_ids = self.layout.bottom_dock.visible_panels.clone();
-        egui::TopBottomPanel::bottom("bottom_region")
-            .resizable(self.bottom_panels_visible)
+        egui::TopBottomPanel::bottom("bottom_dock")
+            .resizable(true)
             .min_height(24.0)
             .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
             .show(ctx, |ui| {
-                if self.bottom_panels_visible {
-                    ui.vertical(|ui| {
-                        self.render_bottom_dock(ui, &panel_ids);
-                    });
-                    ui.separator();
-                }
-                self.render_status_bar_row(ui);
+                ui.vertical(|ui| {
+                    self.render_bottom_dock(ui, &panel_ids);
+                });
             });
     }
 
@@ -6336,12 +6345,13 @@ impl App for RustNotePadApp {
 
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
+        self.show_status_bar(ctx);
+        self.show_bottom_dock(ctx);
         self.show_left_sidebar(ctx);
         if self.document_map_visible {
             self.show_right_sidebar(ctx);
         }
         self.show_editor_area(ctx);
-        self.show_bottom_region(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
