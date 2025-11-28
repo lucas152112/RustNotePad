@@ -90,6 +90,9 @@ const ICON_RELOAD: &str = "\u{f01e}";
 const ICON_FLOPPY: &str = "\u{f0c7}";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
 const PREVIEW_LANGUAGE_ID: &str = "rust";
+const STATUS_BAR_HEIGHT: f32 = 24.0;
+const PROJECT_PANEL_WIDTH: f32 = 220.0;
+const DOCUMENT_MAP_WIDTH: f32 = 180.0;
 
 const MAX_MACRO_MESSAGES: usize = 10;
 const MAX_RUN_HISTORY: usize = 6;
@@ -1603,7 +1606,7 @@ impl StatusBarState {
             eol: "Windows (CR LF)",
             mode: "INS",
             document_language: "Plain Text".into(),
-            ui_language: locale.to_string(),
+            ui_language: short_locale_display_name(locale),
             theme: theme.to_string(),
             caret_char_index: 0,
         };
@@ -1658,7 +1661,7 @@ impl StatusBarState {
     }
 
     fn set_locale(&mut self, locale: &str) {
-        self.ui_language = locale.to_string();
+        self.ui_language = short_locale_display_name(locale);
     }
 
     fn set_document_language(&mut self, language: String) {
@@ -1915,7 +1918,7 @@ impl RustNotePadApp {
         let selected_locale = localization.active_index();
         let locale_display = locale_summaries
             .get(selected_locale)
-            .map(|summary| summary.display_name.clone())
+            .map(|summary| short_locale_display_name(&summary.display_name))
             .unwrap_or_else(|| "English (en-US)".to_string());
         let sample_editor_content = String::new();
 
@@ -2777,6 +2780,7 @@ impl RustNotePadApp {
         egui::Window::new(title)
             .open(&mut open)
             .resizable(true)
+            .frame(self.window_frame(ctx))
             .default_size(vec2(540.0, 720.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -2851,6 +2855,7 @@ impl RustNotePadApp {
             egui::Window::new(self.text("menu.help.user_manual").to_string())
                 .open(&mut open)
                 .resizable(true)
+                .frame(self.window_frame(ctx))
                 .default_width(360.0)
                 .show(ctx, |ui| {
                     ui.label(self.localized(
@@ -2869,6 +2874,7 @@ impl RustNotePadApp {
             egui::Window::new(self.text("menu.help.debug_info").to_string())
                 .open(&mut open)
                 .resizable(true)
+                .frame(self.window_frame(ctx))
                 .default_width(420.0)
                 .show(ctx, |ui| {
                     ui.label(self.localized("Runtime diagnostics", "執行期診斷資訊"));
@@ -2879,7 +2885,7 @@ impl RustNotePadApp {
                         self.current_document_id,
                         self.status.encoding,
                         self.status.ui_language,
-                        self.status.document_language,
+                        self.language_display_name(&self.current_language_id),
                         self.status.theme
                     ));
                 });
@@ -2891,6 +2897,7 @@ impl RustNotePadApp {
             egui::Window::new(self.text("menu.help.about").to_string())
                 .open(&mut open)
                 .resizable(false)
+                .frame(self.window_frame(ctx))
                 .default_width(320.0)
                 .show(ctx, |ui| {
                     ui.heading("RustNotePad");
@@ -4624,6 +4631,14 @@ impl RustNotePadApp {
         self.localization.active_code()
     }
 
+    fn active_locale_display_name(&self) -> String {
+        self.localization
+            .locale_summaries()
+            .get(self.localization.active_index())
+            .map(|summary| short_locale_display_name(&summary.display_name))
+            .unwrap_or_else(|| self.status.ui_language.clone())
+    }
+
     fn localized(&self, en: &str, zh: &str) -> String {
         if self.locale_code().starts_with("zh") {
             zh.to_string()
@@ -4744,8 +4759,11 @@ impl RustNotePadApp {
         }
         self.selected_locale = index;
         if let Some(summary) = summaries.get(index) {
-            self.status.set_locale(&summary.display_name);
+            let display = short_locale_display_name(&summary.display_name);
+            self.status.set_locale(&display);
         }
+        self.status
+            .set_document_language(self.language_display_name(&self.current_language_id));
         if let Some(summary) = summaries.get(index) {
             log_info(self.localized_owned(
                 format!("Locale switched to {}", summary.code),
@@ -4975,6 +4993,27 @@ impl RustNotePadApp {
         ctx.set_style(style);
 
         self.status.set_theme(&definition.name);
+    }
+
+    fn window_frame(&self, ctx: &egui::Context) -> egui::Frame {
+        egui::Frame::window(&ctx.style()).stroke(egui::Stroke::new(
+            1.0,
+            Color32::from_rgb(180, 186, 194),
+        ))
+    }
+
+    fn status_bar_frame(&self) -> egui::Frame {
+        egui::Frame::none()
+            .fill(color32_from_color(self.palette.status_bar))
+            .inner_margin(Margin::same(0.0))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(190, 190, 190)))
+    }
+
+    fn main_panel_frame(&self, ctx: &egui::Context) -> egui::Frame {
+        let mut frame = egui::Frame::central_panel(&ctx.style());
+        frame.fill = color32_from_color(self.palette.background);
+        frame.inner_margin = Margin::same(0.0);
+        frame
     }
 
     fn icon_text(&self, icon: &str, size: f32) -> RichText {
@@ -5252,132 +5291,13 @@ impl RustNotePadApp {
             });
     }
 
-    fn show_left_sidebar(&mut self, ctx: &egui::Context) {
-        if !self.project_panel_visible {
-            return;
-        }
-        egui::SidePanel::left("project_panel")
-            .default_width(220.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading(self.text("panel.project.title"));
-                        ui.allocate_ui_with_layout(
-                            ui.available_size(),
-                            Layout::right_to_left(Align::Center),
-                            |ui| {
-                                if self
-                                    .icon_button(
-                                        ui,
-                                        ICON_XMARK,
-                                        &self.localized("Hide project panel", "關閉專案面板"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.project_panel_visible = false;
-                                }
-                            },
-                        );
-                    });
-                    ui.separator();
-                    if self
-                        .icon_button(
-                            ui,
-                            ICON_RELOAD,
-                            &self.localized(
-                                "Reload project tree from disk",
-                                "從磁碟重新載入專案樹",
-                            ),
-                        )
-                        .clicked()
-                    {
-                        let tree = build_filesystem_project_tree(&self.workspace_root, 4, 200);
-                        if let Err(err) = self.project_tree_store.save(&tree) {
-                            log_warn(format!("Failed to persist project tree: {err}"));
-                        }
-                        self.project_tree = tree;
-                        log_info(self.localized_owned(
-                            "Project tree refreshed".to_string(),
-                            "專案樹已重新整理".to_string(),
-                        ));
-                    }
-                    if self
-                        .icon_button(
-                            ui,
-                            ICON_FLOPPY,
-                            &self.localized(
-                                "Flush session snapshot to disk",
-                                "將工作階段寫入磁碟",
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.persist_session();
-                    }
-                    ui.add_space(6.0);
-                    let root_children = self.project_tree.root.children.clone();
-                    for child in root_children.iter() {
-                        self.render_project_node(ui, child, 0);
-                    }
-                    let has_document = !self.editor_preview.trim().is_empty();
-                    let mut optional_sections_rendered = false;
-                    if has_document {
-                        self.render_sidebar_section(
-                            ui,
-                            &mut optional_sections_rendered,
-                            |this, ui| {
-                                this.render_highlight_summary(ui);
-                            },
-                        );
-                        if self.function_list_visible {
-                            self.render_sidebar_section(
-                                ui,
-                                &mut optional_sections_rendered,
-                                |this, ui| {
-                                    this.render_function_list_panel(ui);
-                                },
-                            );
-                        }
-                    }
-                    if self.should_show_completion_panel() {
-                        self.render_sidebar_section(
-                            ui,
-                            &mut optional_sections_rendered,
-                            |this, ui| {
-                                this.render_completion_panel(ui);
-                            },
-                        );
-                    }
-                    if self.should_show_macro_panel() {
-                        self.render_sidebar_section(
-                            ui,
-                            &mut optional_sections_rendered,
-                            |this, ui| {
-                                this.render_macro_panel(ui);
-                            },
-                        );
-                    }
-                    if self.should_show_run_panel() {
-                        self.render_sidebar_section(
-                            ui,
-                            &mut optional_sections_rendered,
-                            |this, ui| {
-                                this.render_run_panel(ui);
-                            },
-                        );
-                    }
-                });
-            });
-    }
-
-    fn show_right_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("document_map")
-            .default_width(180.0)
-            .resizable(true)
-            .show(ctx, |ui| {
+    fn render_project_panel(&mut self, ui: &mut egui::Ui, height: f32) {
+        ui.set_min_height(height);
+        egui::ScrollArea::vertical()
+            .max_height(height)
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(self.text("panel.document_map.title"));
+                    ui.heading(self.text("panel.project.title"));
                     ui.allocate_ui_with_layout(
                         ui.available_size(),
                         Layout::right_to_left(Align::Center),
@@ -5386,29 +5306,150 @@ impl RustNotePadApp {
                                 .icon_button(
                                     ui,
                                     ICON_XMARK,
-                                    &self.localized("Hide document map", "關閉視圖面板"),
+                                    &self.localized("Hide project panel", "關閉專案面板"),
                                 )
                                 .clicked()
                             {
-                                self.document_map_visible = false;
+                                self.project_panel_visible = false;
                             }
                         },
                     );
                 });
                 ui.separator();
-                egui::ScrollArea::vertical()
-                    .max_height(ui.available_height())
-                    .show(ui, |ui| {
-                        for (idx, line) in self.editor_preview.lines().enumerate() {
-                            let placeholder = if line.is_empty() {
-                                "•".to_string()
-                            } else {
-                                line.chars().map(|_| '•').collect::<String>()
-                            };
-                            ui.label(format!("{:>4} {}", idx + 1, placeholder));
-                        }
-                    });
+                if self
+                    .icon_button(
+                        ui,
+                        ICON_RELOAD,
+                        &self.localized(
+                            "Reload project tree from disk",
+                            "從磁碟重新載入專案樹",
+                        ),
+                    )
+                    .clicked()
+                {
+                    let tree = build_filesystem_project_tree(&self.workspace_root, 4, 200);
+                    if let Err(err) = self.project_tree_store.save(&tree) {
+                        log_warn(format!("Failed to persist project tree: {err}"));
+                    }
+                    self.project_tree = tree;
+                    log_info(self.localized_owned(
+                        "Project tree refreshed".to_string(),
+                        "專案樹已重新整理".to_string(),
+                    ));
+                }
+                if self
+                    .icon_button(
+                        ui,
+                        ICON_FLOPPY,
+                        &self.localized(
+                            "Flush session snapshot to disk",
+                            "將工作階段寫入磁碟",
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.persist_session();
+                }
+                ui.add_space(6.0);
+                let root_children = self.project_tree.root.children.clone();
+                for child in root_children.iter() {
+                    self.render_project_node(ui, child, 0);
+                }
+                let has_document = !self.editor_preview.trim().is_empty();
+                let mut optional_sections_rendered = false;
+                if has_document {
+                    self.render_sidebar_section(
+                        ui,
+                        &mut optional_sections_rendered,
+                        |this, ui| {
+                            this.render_highlight_summary(ui);
+                        },
+                    );
+                    if self.function_list_visible {
+                        self.render_sidebar_section(
+                            ui,
+                            &mut optional_sections_rendered,
+                            |this, ui| {
+                                this.render_function_list_panel(ui);
+                            },
+                        );
+                    }
+                }
+                if self.should_show_completion_panel() {
+                    self.render_sidebar_section(
+                        ui,
+                        &mut optional_sections_rendered,
+                        |this, ui| {
+                            this.render_completion_panel(ui);
+                        },
+                    );
+                }
+                if self.should_show_macro_panel() {
+                    self.render_sidebar_section(
+                        ui,
+                        &mut optional_sections_rendered,
+                        |this, ui| {
+                            this.render_macro_panel(ui);
+                        },
+                    );
+                }
+                if self.should_show_run_panel() {
+                    self.render_sidebar_section(
+                        ui,
+                        &mut optional_sections_rendered,
+                        |this, ui| {
+                            this.render_run_panel(ui);
+                        },
+                    );
+                }
             });
+    }
+
+    fn render_document_map_panel(&mut self, ui: &mut egui::Ui, height: f32) {
+        ui.set_min_height(height);
+        ui.set_max_height(height);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if self
+                .icon_button(
+                    ui,
+                    ICON_XMARK,
+                    &self.localized("Hide document map", "關閉視圖面板"),
+                )
+                .clicked()
+            {
+                self.document_map_visible = false;
+            }
+        });
+        ui.separator();
+        let scroll_height = ui.available_height().max(0.0);
+        egui::ScrollArea::vertical()
+            .max_height(scroll_height)
+            .show(ui, |ui| {
+                for line in self.editor_preview.lines() {
+                    let snippet = Self::document_map_snippet(line, 64);
+                    ui.label(snippet);
+                }
+            });
+    }
+
+    fn document_map_snippet(line: &str, max_chars: usize) -> String {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            "…".to_string()
+        } else {
+            let mut result = String::new();
+            for ch in trimmed.chars().take(max_chars) {
+                if ch == '\t' {
+                    result.push(' ');
+                } else {
+                    result.push(ch);
+                }
+            }
+            if trimmed.chars().count() > max_chars {
+                result.push('…');
+            }
+            result
+        }
     }
 
     fn render_bottom_dock(&mut self, ui: &mut egui::Ui, panel_ids: &[String]) {
@@ -5614,24 +5655,31 @@ impl RustNotePadApp {
     }
 
     fn render_status_bar_row(&mut self, ui: &mut egui::Ui) -> Rect {
-        let status_height = 24.0;
+        let document_language = self.language_display_name(&self.current_language_id);
+        let mode_label = self.format_indexed("status.mode_label", &[self.status.mode.to_string()]);
+        let encoding_label =
+            self.format_indexed("status.encoding_label", &[self.status.encoding.to_string()]);
+        let eol_label = {
+            let raw = self.status.eol.to_ascii_lowercase();
+            if raw.contains("windows") || raw.contains("cr lf") {
+                self.text("status.eol.win").into_owned()
+            } else if raw.contains("mac") && !raw.contains("cr lf") {
+                self.text("status.eol.mac").into_owned()
+            } else {
+                self.text("status.eol.unix").into_owned()
+            }
+        };
+        let ui_language_value = self.active_locale_display_name();
         let status_response =
-            ui.allocate_ui(vec2(ui.available_width(), status_height), |ui| {
-                ui.set_min_height(status_height);
-                let palette = &self.palette;
-                ui.painter().rect_filled(
-                    ui.max_rect(),
-                    0.0,
-                    color32_from_color(palette.status_bar),
-                );
+            ui.allocate_ui(vec2(ui.available_width(), STATUS_BAR_HEIGHT), |ui| {
+                ui.set_min_height(STATUS_BAR_HEIGHT);
                 ui.painter().line_segment(
                     [ui.min_rect().left_top(), ui.min_rect().right_top()],
-                    egui::Stroke::new(1.0, Color32::from_rgb(190, 190, 190)),
+                    egui::Stroke::new(1.0, Color32::from_rgb(160, 160, 160)),
                 );
-
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
-                    ui.label(self.status.document_language.clone());
+                    ui.label(document_language);
                     ui.separator();
                     ui.label(self.format_indexed(
                         "status.length_lines",
@@ -5655,11 +5703,13 @@ impl RustNotePadApp {
                         Layout::right_to_left(Align::Center),
                         |ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.label(self.status.mode);
+                            ui.label(ui_language_value);
                             ui.separator();
-                            ui.label(self.status.encoding);
+                            ui.label(eol_label);
                             ui.separator();
-                            ui.label(self.status.eol);
+                            ui.label(encoding_label);
+                            ui.separator();
+                            ui.label(mode_label);
                             ui.allocate_space(ui.available_size());
                         },
                     );
@@ -5671,8 +5721,8 @@ impl RustNotePadApp {
     fn show_status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status_bar")
             .resizable(false)
-            .exact_height(24.0)
-            .frame(egui::Frame::none().inner_margin(Margin::same(0.0)))
+            .exact_height(STATUS_BAR_HEIGHT)
+            .frame(self.status_bar_frame())
             .show(ctx, |ui| {
                 self.render_status_bar_row(ui);
             });
@@ -5695,90 +5745,153 @@ impl RustNotePadApp {
     }
 
     fn show_editor_area(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let primary_snapshot = self
-                .layout
-                .panes
-                .iter()
-                .find(|pane| pane.role == PaneRole::Primary)
-                .cloned();
-            let secondary_snapshot = self
-                .layout
-                .panes
-                .iter()
-                .find(|pane| pane.role == PaneRole::Secondary)
-                .cloned();
+        egui::CentralPanel::default()
+            .frame(self.main_panel_frame(ctx))
+            .show(ctx, |ui| {
+                let total_height = (ui.available_height() - STATUS_BAR_HEIGHT).max(0.0);
+                let total_width = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    vec2(total_width, total_height),
+                    Layout::left_to_right(Align::Min),
+                    |ui| {
+                        if self.project_panel_visible {
+                            ui.allocate_ui_with_layout(
+                                vec2(PROJECT_PANEL_WIDTH, total_height),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    self.render_project_panel(ui, total_height);
+                                },
+                            );
+                            ui.separator();
+                        }
 
-            let available_height = ui.available_height();
-            let available_width = ui.available_width();
-            let primary_width = available_width * self.layout.split_ratio;
-            let secondary_width = available_width - primary_width;
-
-            ui.allocate_ui_with_layout(
-                vec2(available_width, available_height),
-                Layout::left_to_right(Align::Min),
-                |ui| {
-                    if let Some(pane) = primary_snapshot {
+                        let mut center_width = ui.available_width();
+                        if self.document_map_visible {
+                            center_width =
+                                (center_width - DOCUMENT_MAP_WIDTH - ui.spacing().item_spacing.x)
+                                    .max(0.0);
+                        }
                         ui.allocate_ui_with_layout(
-                            vec2(primary_width, available_height),
+                            vec2(center_width, total_height),
                             Layout::top_down(Align::Min),
                             |ui| {
-                                self.render_tab_strip(ui, pane.clone());
-                                ui.separator();
-                                egui::Frame::group(ui.style())
-                                    .fill(color32_from_color(self.palette.editor_background))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        color32_from_color(self.palette.panel),
-                                    ))
-                                    .show(ui, |ui| {
-                                        let previous_text = self.editor_preview.clone();
-                                        let mut buffer = previous_text.clone();
-                                        let available = ui.available_size();
-                                        ui.set_min_size(available);
-                                        let text_edit = egui::TextEdit::multiline(&mut buffer)
-                                            .id_source("primary_editor")
-                                            .font(TextStyle::Monospace)
-                                            .desired_rows(24)
-                                            .desired_width(f32::INFINITY);
-                                        let output = text_edit.show(ui);
-
-                                        if output.response.changed() && buffer != previous_text {
-                                            self.record_undo_snapshot(previous_text);
-                                            self.editor_redo_stack.clear();
-                                            self.apply_editor_text(buffer);
-                                        }
-
-                                        let mut current_selection = output
-                                            .cursor_range
-                                            .map(|range| range.as_ccursor_range());
-
-                                        if let Some(pending) = self.pending_editor_selection.take()
-                                        {
-                                            let mut state = output.state.clone();
-                                            state.set_ccursor_range(Some(pending));
-                                            state.store(ui.ctx(), output.response.id);
-                                            current_selection = Some(pending);
-                                        }
-
-                                        if current_selection.is_none() {
-                                            current_selection = self.editor_selection;
-                                        }
-                                        self.update_editor_selection(current_selection);
-                                    });
+                                self.render_editor_panes(ui);
                             },
                         );
-                    }
 
-                    if let Some(pane) = secondary_snapshot {
-                        ui.separator();
-                        ui.allocate_ui_with_layout(
-                            vec2(secondary_width, available_height),
-                            Layout::top_down(Align::Min),
-                            |ui| {
-                                self.render_tab_strip(ui, pane.clone());
-                                ui.separator();
-                                egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.document_map_visible {
+                            ui.separator();
+                            ui.allocate_ui_with_layout(
+                                vec2(DOCUMENT_MAP_WIDTH, total_height),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    self.render_document_map_panel(ui, total_height);
+                                },
+                            );
+                        }
+                    },
+                );
+            });
+    }
+
+    fn render_editor_panes(&mut self, ui: &mut egui::Ui) {
+        let primary_snapshot = self
+            .layout
+            .panes
+            .iter()
+            .find(|pane| pane.role == PaneRole::Primary)
+            .cloned();
+        let secondary_snapshot = self
+            .layout
+            .panes
+            .iter()
+            .find(|pane| pane.role == PaneRole::Secondary)
+            .cloned();
+
+        let available_height = ui.available_height().max(0.0);
+        let available_width = ui.available_width();
+        let primary_width = available_width * self.layout.split_ratio;
+        let secondary_width = available_width - primary_width;
+
+        ui.allocate_ui_with_layout(
+            vec2(available_width, available_height),
+            Layout::left_to_right(Align::Min),
+            |ui| {
+                if let Some(pane) = primary_snapshot {
+                    ui.allocate_ui_with_layout(
+                        vec2(primary_width, available_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            self.render_tab_strip(ui, pane.clone());
+                            ui.separator();
+                            let editor_size = ui.available_size();
+                            ui.allocate_ui_with_layout(
+                                editor_size,
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    egui::Frame::group(ui.style())
+                                        .fill(color32_from_color(self.palette.editor_background))
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            color32_from_color(self.palette.panel),
+                                        ))
+                                        .show(ui, |ui| {
+                                            let previous_text = self.editor_preview.clone();
+                                            let mut buffer = previous_text.clone();
+                                            let available = ui.available_size();
+                                            ui.set_min_size(available);
+                                            ui.set_max_size(available);
+                                            let text_edit = egui::TextEdit::multiline(&mut buffer)
+                                                .id_source("primary_editor")
+                                                .font(TextStyle::Monospace)
+                                                .desired_rows(24)
+                                                .desired_width(f32::INFINITY);
+                                            let output = text_edit.show(ui);
+
+                                            if output.response.changed()
+                                                && buffer != previous_text
+                                            {
+                                                self.record_undo_snapshot(previous_text);
+                                                self.editor_redo_stack.clear();
+                                                self.apply_editor_text(buffer);
+                                            }
+
+                                            let mut current_selection = output
+                                                .cursor_range
+                                                .map(|range| range.as_ccursor_range());
+
+                                            if let Some(pending) =
+                                                self.pending_editor_selection.take()
+                                            {
+                                                let mut state = output.state.clone();
+                                                state.set_ccursor_range(Some(pending));
+                                                state.store(ui.ctx(), output.response.id);
+                                                current_selection = Some(pending);
+                                            }
+
+                                            if current_selection.is_none() {
+                                                current_selection = self.editor_selection;
+                                            }
+                                            self.update_editor_selection(current_selection);
+                                        });
+                                },
+                            );
+                        },
+                    );
+                }
+
+                if let Some(pane) = secondary_snapshot {
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        vec2(secondary_width, available_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            self.render_tab_strip(ui, pane.clone());
+                            ui.separator();
+                            let secondary_height = ui.available_height().max(0.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(secondary_height)
+                                .show(ui, |ui| {
                                     ui.label(self.text("panel.secondary.title"));
                                     ui.add_space(6.0);
                                     if let Some(active) = pane.active_tab() {
@@ -5789,12 +5902,11 @@ impl RustNotePadApp {
                                         ui.label(self.text("panel.secondary.readonly"));
                                     }
                                 });
-                            },
-                        );
-                    }
-                },
-            );
-        });
+                        },
+                    );
+                }
+            },
+        );
     }
 
     fn render_highlight_summary(&self, ui: &mut egui::Ui) {
@@ -6363,13 +6475,9 @@ impl App for RustNotePadApp {
 
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
-        self.show_status_bar(ctx);
         self.show_bottom_dock(ctx);
-        self.show_left_sidebar(ctx);
-        if self.document_map_visible {
-            self.show_right_sidebar(ctx);
-        }
         self.show_editor_area(ctx);
+        self.show_status_bar(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
@@ -6404,6 +6512,7 @@ impl RustNotePadApp {
         egui::Window::new(self.text("settings.window.title").to_string())
             .open(&mut open)
             .resizable(true)
+            .frame(self.window_frame(ctx))
             .default_width(520.0)
             .show(ctx, |ui| {
                 ui.set_min_height(320.0);
@@ -6636,6 +6745,7 @@ impl RustNotePadApp {
             egui::Window::new(self.localized("Open File", "開啟檔案"))
                 .collapsible(false)
                 .resizable(false)
+                .frame(self.window_frame(ctx))
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.set_min_width(360.0);
@@ -6667,6 +6777,7 @@ impl RustNotePadApp {
             egui::Window::new(self.localized("Save As", "另存新檔"))
                 .collapsible(false)
                 .resizable(false)
+                .frame(self.window_frame(ctx))
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.set_min_width(360.0);
@@ -7156,6 +7267,15 @@ fn locale_requires_cjk(code: &str) -> bool {
         || normalised.starts_with("ko")
         || normalised == "zh-tw"
         || normalised == "zh-cn"
+}
+
+fn short_locale_display_name(display_name: &str) -> String {
+    display_name
+        .split_once('(')
+        .map(|(head, _)| head.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(display_name)
+        .to_string()
 }
 
 fn clamp_to_u32(value: usize) -> u32 {
