@@ -1,5 +1,21 @@
 # Develop Diary / 開發日誌
 
+## 2025-11-29
+
+### 完成 / Completed
+- 修正預覽視窗（Document Map）內容顯示：將空白行與非空白字元的顯示邏輯調整為以 `.` 代表非空白字元，保留空白字元，解決了原先顯示 `…` 或空白的問題，提供更清晰的縮圖預覽效果。 / Fixed the preview window (Document Map) content display: adjusted the logic to render non-whitespace characters as `.` and preserve whitespace, replacing the previous `…` or empty output for a clearer thumbnail preview.
+- 重構主視窗佈局：將文件預覽視窗與專案面板改為獨立的 `SidePanel`（分別位於右側與左側），編輯視窗維持在 `CentralPanel`，確保三個視窗在視覺與邏輯上完全獨立，不再發生重疊或佈局錯亂。 / Refactored the main window layout: moved the document preview and project panel into independent `SidePanel`s (right and left respectively), keeping the editor in the `CentralPanel`, ensuring the three panes are visually and logically distinct without overlap or layout issues.
+- 優化狀態列顯示層級：調整 `App::update` 中的渲染順序，將 `show_status_bar` 移至 `show_editor_area` 之前呼叫，確保狀態列優先佔據底部空間，徹底解決被左右面板或編輯視窗遮蓋的問題，實現狀態列的獨立與置底顯示。 / Optimized status bar layering: adjusted the render order in `App::update` to call `show_status_bar` before `show_editor_area`, ensuring the status bar claims the bottom space first, completely resolving coverage issues by side panels or the editor, achieving a truly independent and docked status bar.
+- 實作圖示工具列：新增「新增、開啟、儲存、復原、重做、剪下、複製、貼上、搜尋、執行、設定」等常用功能圖示，並使用 FontAwesome 字型呈現現代化外觀。 / Implemented Icon Toolbar: Added icons for common actions (New, Open, Save, Undo, Redo, Cut, Copy, Paste, Find, Run, Settings) using FontAwesome for a modern look.
+- 實作工作階段持久化：改進 `persist_session` 與 `restore_session_snapshot` 邏輯，現在能正確儲存並還原所有開啟的分頁，而不僅僅是當前分頁。 / Implemented Session Persistence: Improved `persist_session` and `restore_session_snapshot` logic to correctly save and restore all open tabs, not just the active one.
+- 現代化 UI 設計：
+    - 移除編輯器邊框，改採全寬度無邊框設計。 / Modernized UI: Removed editor borders for a full-width, borderless design.
+    - 啟用自訂視窗裝飾，移除作業系統標題列，改用自訂的最小化、最大化/還原、關閉按鈕。 / Enabled custom window decorations, removing the OS title bar in favor of custom Minimize, Maximize/Restore, and Close buttons.
+    - 統一視窗圓角設計（上方與下方皆為圓角）。 / Unified rounded corner design (both top and bottom).
+    - 為設定與說明視窗加入模態遮罩（Modal Overlay），聚焦使用者注意力。 / Added modal overlays for Settings and Help windows to focus user attention.
+    - 調整狀態列文字間距，避免貼邊。 / Adjusted status bar text padding to prevent edge crowding.
+- 修正編輯器行距：透過自訂 `layouter` 實作了 `egui::TextEdit` 的行距控制，提供更舒適的閱讀體驗。 / Fixed editor line spacing: Implemented line spacing control for `egui::TextEdit` via a custom `layouter` for a more comfortable reading experience.
+
 ## 2025-11-25
 
 ### 完成 / Completed

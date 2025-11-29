@@ -82,12 +82,25 @@ use std::os::unix::ffi::OsStrExt;
 use x11rb::xcb_ffi::XCBConnection;
 
 const APP_TITLE: &str = "RustNotePad – UI Preview";
-const ICON_FONT_NAME: &str = "Font Awesome 7 Free Solid";
-const ICON_XMARK: &str = "\u{f00d}";
+const ICON_FONT_NAME: &str = "Font Awesome";
+const ICON_XMARK: &str = "\u{f410}"; // Window Close Regular
 const ICON_FOLDER: &str = "\u{f07b}";
 const ICON_FOLDER_TREE: &str = "\u{f802}";
 const ICON_RELOAD: &str = "\u{f01e}";
 const ICON_FLOPPY: &str = "\u{f0c7}";
+const ICON_FILE_NEW: &str = "\u{f016}";
+const ICON_FOLDER_OPEN: &str = "\u{f07c}";
+const ICON_UNDO: &str = "\u{f0e2}";
+const ICON_REDO: &str = "\u{f01e}";
+const ICON_CUT: &str = "\u{f0c4}";
+const ICON_COPY: &str = "\u{f0c5}";
+const ICON_PASTE: &str = "\u{f0ea}";
+const ICON_SEARCH: &str = "\u{f002}";
+const ICON_SETTINGS: &str = "\u{f013}";
+const ICON_PLAY: &str = "\u{f04b}";
+const ICON_WINDOW_MINIMIZE: &str = "\u{f2d1}";
+const ICON_WINDOW_MAXIMIZE: &str = "\u{f2d0}";
+const ICON_WINDOW_RESTORE: &str = "\u{f2d2}";
 const PREVIEW_DOCUMENT_ID: &str = "preview.rs";
 const PREVIEW_LANGUAGE_ID: &str = "rust";
 const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -2148,7 +2161,7 @@ impl RustNotePadApp {
             plugin_win_install_overwrite: false,
             plugin_pending_removal: None,
             view_fullscreen: false,
-            project_panel_visible: false,
+            project_panel_visible: true,
             function_list_visible: true,
             document_map_visible: true,
             bottom_panels_visible: false,
@@ -2522,9 +2535,13 @@ impl RustNotePadApp {
 
     fn restore_session_snapshot(&mut self, snapshot: SessionSnapshot) {
         let mut active_target: Option<(String, SessionTab)> = None;
+        
+        // Clear existing tabs before restoring session
+        self.prepare_primary_pane();
+
         if let Some(window) = snapshot.windows.first() {
             for (idx, tab) in window.tabs.iter().enumerate() {
-                if let Some(path) = tab.path.as_ref() {
+                let tab_id = if let Some(path) = tab.path.as_ref() {
                     let resolved = self.resolve_path(path);
                     let path_string = resolved.to_string_lossy().to_string();
                     let display = tab
@@ -2534,11 +2551,22 @@ impl RustNotePadApp {
                         .unwrap_or_else(|| path_string.as_str())
                         .to_string();
                     self.open_document(&path_string, &display);
-                    if Some(idx) == window.active_tab {
-                        active_target = Some((path_string.clone(), tab.clone()));
-                    }
+                    path_string
+                } else if let Some(display_name) = &tab.display_name {
+                    // Handle untitled/unsaved tabs if possible, or just recreate them
+                    // For now, we might skip them or treat them as new untitled
+                    // Simplified: just use display name as ID if no path
+                    // In a real app, we'd restore content from autosave hash
+                    display_name.clone()
+                } else {
+                    continue;
+                };
+
+                if Some(idx as usize) == window.active_tab.map(|i| i as usize) {
+                    active_target = Some((tab_id, tab.clone()));
                 }
             }
+            
             if let Some((tab_id, tab)) = active_target {
                 if self.activate_tab(&tab_id) {
                     self.apply_session_tab_state(&tab);
@@ -4687,25 +4715,70 @@ impl RustNotePadApp {
             ));
         }
 
-        let mut tab = SessionTab::default();
-        if Path::new(&self.current_document_id).exists() {
-            tab.path = Some(Path::new(&self.current_document_id).to_path_buf());
+        let mut tabs = Vec::new();
+        let mut active_tab_index = None;
+
+        // Collect all tabs from the primary pane
+        if let Some(pane) = self.layout.panes.iter().find(|p| p.role == PaneRole::Primary) {
+            for (idx, tab_view) in pane.tabs.iter().enumerate() {
+                let mut session_tab = SessionTab::default();
+                if let Some(path) = &self.current_document_path {
+                    if tab_view.id == self.current_document_id {
+                         session_tab.path = Some(path.clone());
+                    }
+                } else if Path::new(&tab_view.id).exists() {
+                     session_tab.path = Some(Path::new(&tab_view.id).to_path_buf());
+                }
+                
+                session_tab.display_name = Some(tab_view.title.clone());
+                
+                if tab_view.id == self.current_document_id {
+                    session_tab.caret = SessionCaret {
+                        line: clamp_to_u32(self.status.line.saturating_sub(1)),
+                        column: clamp_to_u32(self.status.column.saturating_sub(1)),
+                    };
+                    session_tab.unsaved_hash = Some(hash.clone());
+                    active_tab_index = Some(idx);
+                } else {
+                     // For non-active tabs, we might not have their content loaded in editor_preview
+                     // In a real implementation, we'd need to track state for all tabs.
+                     // For now, we just save basic info.
+                     session_tab.caret = SessionCaret::default();
+                }
+                
+                session_tab.scroll = SessionScroll {
+                    top_line: 0,
+                    horizontal_offset: 0,
+                };
+                session_tab.dirty_external = false;
+                tabs.push(session_tab);
+            }
         }
-        tab.display_name = Some(self.current_document_id.clone());
-        tab.caret = SessionCaret {
-            line: clamp_to_u32(self.status.line.saturating_sub(1)),
-            column: clamp_to_u32(self.status.column.saturating_sub(1)),
-        };
-        tab.scroll = SessionScroll {
-            top_line: 0,
-            horizontal_offset: 0,
-        };
-        tab.unsaved_hash = Some(hash);
-        tab.dirty_external = false;
+        
+        // If no tabs found (e.g. empty state), create a dummy one for current state
+        if tabs.is_empty() {
+             let mut tab = SessionTab::default();
+            if Path::new(&self.current_document_id).exists() {
+                tab.path = Some(Path::new(&self.current_document_id).to_path_buf());
+            }
+            tab.display_name = Some(self.current_document_id.clone());
+            tab.caret = SessionCaret {
+                line: clamp_to_u32(self.status.line.saturating_sub(1)),
+                column: clamp_to_u32(self.status.column.saturating_sub(1)),
+            };
+            tab.scroll = SessionScroll {
+                top_line: 0,
+                horizontal_offset: 0,
+            };
+            tab.unsaved_hash = Some(hash);
+            tab.dirty_external = false;
+            tabs.push(tab);
+            active_tab_index = Some(0);
+        }
 
         let mut window = SessionWindow::new();
-        window.tabs.push(tab);
-        window.active_tab = Some(0);
+        window.tabs = tabs;
+        window.active_tab = active_tab_index;
 
         let snapshot = SessionSnapshot::new(vec![window]);
         match self.session_store.save(&snapshot) {
@@ -5006,6 +5079,12 @@ impl RustNotePadApp {
         egui::Frame::none()
             .fill(color32_from_color(self.palette.status_bar))
             .inner_margin(Margin::same(0.0))
+            .rounding(egui::Rounding {
+                nw: 0.0,
+                ne: 0.0,
+                sw: 8.0,
+                se: 8.0,
+            })
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(190, 190, 190)))
     }
 
@@ -5038,13 +5117,36 @@ impl RustNotePadApp {
         }
 
         let mut definitions = FontDefinitions::default();
-        if let Some((name, data)) = load_icon_font() {
+
+        // Load Solid first (so it ends up after Regular)
+        if let Some(data) = load_font_asset("Font Awesome 7 Free-Solid-900.otf") {
+            let name = "Font Awesome Solid".to_string();
             definitions
                 .font_data
                 .insert(name.clone(), FontData::from_owned(data));
             definitions
                 .families
-                .entry(FontFamily::Name(name.clone().into()))
+                .entry(FontFamily::Name(ICON_FONT_NAME.into()))
+                .or_default()
+                .push(name.clone());
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
+                family.push(name.clone());
+            }
+            if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
+                family.push(name.clone());
+            }
+            self.icon_font_available = true;
+        }
+
+        // Load Regular second (so it ends up first)
+        if let Some(data) = load_font_asset("Font Awesome 7 Free-Regular-400.otf") {
+            let name = "Font Awesome Regular".to_string();
+            definitions
+                .font_data
+                .insert(name.clone(), FontData::from_owned(data));
+            definitions
+                .families
+                .entry(FontFamily::Name(ICON_FONT_NAME.into()))
                 .or_default()
                 .insert(0, name.clone());
             if let Some(family) = definitions.families.get_mut(&FontFamily::Proportional) {
@@ -5054,15 +5156,8 @@ impl RustNotePadApp {
                 family.insert(0, name.clone());
             }
             self.icon_font_available = true;
-            log_info(format!(
-                "Loaded icon font '{name}' ({} bytes)",
-                definitions
-                    .font_data
-                    .get(&name)
-                    .map(|d| d.font.len())
-                    .unwrap_or(0)
-            ));
         }
+
         if let Some((name, data)) = load_cjk_font() {
             definitions
                 .font_data
@@ -5102,6 +5197,19 @@ impl RustNotePadApp {
         self.fonts_installed = true;
     }
 
+    fn get_menu_label(&self, item_key: &str) -> String {
+        match item_key {
+            "menu.view.toggle_fullscreen" => {
+                if self.view_fullscreen {
+                    self.localized("Exit Fullscreen", "離開全螢幕")
+                } else {
+                    self.localized("Enter Fullscreen", "進入全螢幕")
+                }
+            }
+            _ => self.text(item_key).into_owned(),
+        }
+    }
+
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar")
             .resizable(false)
@@ -5109,9 +5217,21 @@ impl RustNotePadApp {
                 egui::Frame::none()
                     .fill(color32_from_color(self.palette.panel))
                     .inner_margin(Margin::symmetric(8.0, 4.0))
+                    .rounding(egui::Rounding {
+                        nw: 8.0,
+                        ne: 8.0,
+                        sw: 0.0,
+                        se: 0.0,
+                    })
                     .stroke(egui::Stroke::new(1.0, Color32::from_rgb(204, 204, 204))),
             )
             .show(ctx, |ui| {
+                let menu_bar_rect = ui.max_rect();
+                let response = ui.interact(menu_bar_rect, ui.id(), egui::Sense::drag());
+                if response.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.spacing_mut().button_padding = vec2(6.0, 2.5);
                 ui.horizontal(|ui| {
@@ -5132,7 +5252,7 @@ impl RustNotePadApp {
                             let is_window = section.title_key == "menu.window";
                             let is_help = section.title_key == "menu.help";
                             for item_key in section.item_keys {
-                                let label = self.text(item_key).into_owned();
+                                let label = self.get_menu_label(item_key);
                                 if is_settings {
                                     if ui.button(label.clone()).clicked() {
                                         self.handle_settings_command(item_key);
@@ -5204,6 +5324,24 @@ impl RustNotePadApp {
                             }
                         });
                     }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.icon_button(ui, ICON_XMARK, "Close").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                        let max_icon = if is_maximized {
+                            ICON_WINDOW_RESTORE
+                        } else {
+                            ICON_WINDOW_MAXIMIZE
+                        };
+                        if self.icon_button(ui, max_icon, "Maximize/Restore").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                        }
+                        if self.icon_button(ui, ICON_WINDOW_MINIMIZE, "Minimize").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                    });
                 });
             });
     }
@@ -5222,6 +5360,81 @@ impl RustNotePadApp {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.spacing_mut().button_padding = vec2(6.0, 3.0);
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if self
+                        .icon_button(ui, ICON_FILE_NEW, &self.localized("New", "新增"))
+                        .clicked()
+                    {
+                        self.handle_file_command("menu.file.new");
+                    }
+                    if self
+                        .icon_button(ui, ICON_FOLDER_OPEN, &self.localized("Open", "開啟"))
+                        .clicked()
+                    {
+                        self.handle_file_command("menu.file.open");
+                    }
+                    if self
+                        .icon_button(ui, ICON_FLOPPY, &self.localized("Save", "儲存"))
+                        .clicked()
+                    {
+                        self.handle_file_command("menu.file.save");
+                    }
+                    ui.separator();
+
+                    if self.icon_button(ui, ICON_UNDO, &self.localized("Undo", "復原")).clicked() {
+                        self.handle_edit_command("menu.edit.undo");
+                    }
+                    if self.icon_button(ui, ICON_REDO, &self.localized("Redo", "重做")).clicked() {
+                        self.handle_edit_command("menu.edit.redo");
+                    }
+                    ui.separator();
+                    if self.icon_button(ui, ICON_CUT, &self.localized("Cut", "剪下")).clicked() {
+                        self.handle_edit_command("menu.edit.cut");
+                    }
+                    if self.icon_button(ui, ICON_COPY, &self.localized("Copy", "複製")).clicked() {
+                        self.handle_edit_command("menu.edit.copy");
+                    }
+                    if self.icon_button(ui, ICON_PASTE, &self.localized("Paste", "貼上")).clicked() {
+                        self.handle_edit_command("menu.edit.paste");
+                    }
+                    ui.separator();
+                    if self.icon_button(ui, ICON_SEARCH, &self.localized("Find", "搜尋")).clicked() {
+                        self.handle_search_command("menu.search.find");
+                    }
+                    if self.icon_button(ui, ICON_PLAY, &self.localized("Run", "執行")).clicked() {
+                        self.handle_run_command("menu.run.run");
+                    }
+                    if self.icon_button(ui, ICON_SETTINGS, &self.localized("Settings", "設定")).clicked() {
+                        self.handle_settings_command("menu.settings.preferences");
+                    }
+                    ui.separator();
+
+                    let toggle_icon = if self.project_panel_visible {
+                        ICON_FOLDER_TREE
+                    } else {
+                        ICON_FOLDER
+                    };
+                    if self
+                        .icon_button(
+                            ui,
+                            toggle_icon,
+                            &self.localized("Toggle file tree", "切換檔案清單"),
+                        )
+                        .clicked()
+                    {
+                        self.project_panel_visible = !self.project_panel_visible;
+                        if self.project_panel_visible {
+                            self.push_localized_notification(
+                                "Project panel visible.",
+                                "專案面板已顯示。",
+                            );
+                        } else {
+                            self.push_localized_notification(
+                                "Project panel hidden.",
+                                "專案面板已隱藏。",
+                            );
+                        }
+                    }
+
                     if self.project_panel_visible {
                         let workspace_label = format!(
                             "{}: {}",
@@ -5246,38 +5459,12 @@ impl RustNotePadApp {
                         }
                     }
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let toggle_icon = if self.project_panel_visible {
-                            ICON_FOLDER_TREE
-                        } else {
-                            ICON_FOLDER
-                        };
-                        if self
-                            .icon_button(
-                                ui,
-                                toggle_icon,
-                                &self.localized("Toggle file tree", "切換檔案清單"),
-                            )
-                            .clicked()
-                        {
-                            self.project_panel_visible = !self.project_panel_visible;
-                            if self.project_panel_visible {
-                                self.push_localized_notification(
-                                    "Project panel visible.",
-                                    "專案面板已顯示。",
-                                );
-                            } else {
-                                self.push_localized_notification(
-                                    "Project panel hidden.",
-                                    "專案面板已隱藏。",
-                                );
-                            }
-                        }
-                        let pinned_count = self.layout.pinned_tabs().len();
-                        ui.label(
-                            self.format_indexed("toolbar.pinned_tabs", &[pinned_count.to_string()]),
-                        );
-                    });
+                    // ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    //     let pinned_count = self.layout.pinned_tabs().len();
+                    //     ui.label(
+                    //         self.format_indexed("toolbar.pinned_tabs", &[pinned_count.to_string()]),
+                    //     );
+                    // });
                 });
 
                 if let Some(warning) = &self.font_warning {
@@ -5678,6 +5865,7 @@ impl RustNotePadApp {
                     egui::Stroke::new(1.0, Color32::from_rgb(160, 160, 160)),
                 );
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add_space(5.0);
                     ui.spacing_mut().item_spacing.x = 10.0;
                     ui.label(document_language);
                     ui.separator();
@@ -5702,6 +5890,7 @@ impl RustNotePadApp {
                         ui.available_size(),
                         Layout::right_to_left(Align::Center),
                         |ui| {
+                            ui.add_space(5.0);
                             ui.spacing_mut().item_spacing.x = 8.0;
                             ui.label(ui_language_value);
                             ui.separator();
@@ -5796,8 +5985,15 @@ impl RustNotePadApp {
             Layout::left_to_right(Align::Min),
             |ui| {
                 if let Some(pane) = primary_snapshot {
+                    // Use available width if no secondary pane, otherwise use split ratio
+                    let width = if secondary_snapshot.is_some() {
+                        primary_width
+                    } else {
+                        available_width
+                    };
+                    
                     ui.allocate_ui_with_layout(
-                        vec2(primary_width, available_height),
+                        vec2(width, available_height),
                         Layout::top_down(Align::Min),
                         |ui| {
                             self.render_tab_strip(ui, pane.clone());
@@ -5809,22 +6005,44 @@ impl RustNotePadApp {
                                 |ui| {
                                     egui::Frame::group(ui.style())
                                         .fill(color32_from_color(self.palette.editor_background))
-                                        .stroke(egui::Stroke::new(
-                                            1.0,
-                                            color32_from_color(self.palette.panel),
-                                        ))
+                                        .stroke(egui::Stroke::NONE) // Modern look: no border
+                                        .inner_margin(Margin::same(0.0)) // Maximize space
                                         .show(ui, |ui| {
                                             let previous_text = self.editor_preview.clone();
                                             let mut buffer = previous_text.clone();
-                                            let available = ui.available_size();
-                                            ui.set_min_size(available);
-                                            ui.set_max_size(available);
-                                            let text_edit = egui::TextEdit::multiline(&mut buffer)
-                                                .id_source("primary_editor")
-                                                .font(TextStyle::Monospace)
-                                                .desired_rows(24)
-                                                .desired_width(f32::INFINITY);
-                                            let output = text_edit.show(ui);
+
+                                            let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
+                                                let mut layout_job = egui::text::LayoutJob::default();
+                                                let font_id = egui::FontId::monospace(12.0);
+                                                let color = ui.visuals().text_color();
+                                                layout_job.append(
+                                                    string,
+                                                    0.0,
+                                                    egui::text::TextFormat {
+                                                        font_id,
+                                                        color,
+                                                        line_height: Some(16.0), // 12.0 + 4.0 spacing
+                                                        ..Default::default()
+                                                    },
+                                                );
+                                                layout_job.wrap.max_width = wrap_width;
+                                                ui.fonts(|f| f.layout_job(layout_job))
+                                            };
+
+                                            let output = egui::ScrollArea::both()
+                                                .id_source("editor_scroll_area")
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    let text_edit = egui::TextEdit::multiline(&mut buffer)
+                                                        .id_source("primary_editor")
+                                                        .layouter(&mut layouter)
+                                                        .desired_width(f32::INFINITY)
+                                                        .desired_rows(1) // Let it grow
+                                                        .lock_focus(true)
+                                                        .frame(false); // Modern look: no internal frame
+                                                    text_edit.show(ui)
+                                                })
+                                                .inner;
 
                                             if output.response.changed()
                                                 && buffer != previous_text
@@ -6269,50 +6487,60 @@ impl RustNotePadApp {
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
         let total_width = ui.available_width();
-        let close_button_width = 28.0;
-        let tabs_width = (total_width - close_button_width - 6.0).max(0.0);
-        ui.horizontal(|ui| {
-            ui.set_width(tabs_width);
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let active_id = pane.active.as_deref();
-                    for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
-                        self.render_tab_button(ui, pane.role, active_id, tab);
-                    }
-                    for tab in pane.tabs.iter().filter(|tab| !tab.is_pinned) {
-                        self.render_tab_button(ui, pane.role, active_id, tab);
-                    }
+        let height = self.theme_manager.active_theme().fonts.ui_size as f32 + 8.0;
+        let (rect, _response) = ui.allocate_exact_size(vec2(total_width, height), egui::Sense::hover());
+
+        ui.allocate_ui_at_rect(rect, |ui| {
+            let close_button_width = 28.0;
+            let tabs_width = (total_width - close_button_width - 6.0).max(0.0);
+            
+            // Render tabs on the left
+            let tabs_rect = Rect::from_min_size(rect.min, vec2(tabs_width, height));
+            ui.allocate_ui_at_rect(tabs_rect, |ui| {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let active_id = pane.active.as_deref();
+                        for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
+                            self.render_tab_button(ui, pane.role, active_id, tab);
+                        }
+                        for tab in pane.tabs.iter().filter(|tab| !tab.is_pinned) {
+                            self.render_tab_button(ui, pane.role, active_id, tab);
+                        }
+                    });
                 });
             });
 
-            ui.add_space(6.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let active_tab = pane
-                    .active
-                    .as_deref()
-                    .and_then(|id| pane.tabs.iter().find(|tab| tab.id == id));
-                let can_close = active_tab
-                    .map(|tab| !tab.is_pinned && !tab.is_locked)
-                    .unwrap_or(false);
-                if let Some(tab) = active_tab {
-                    let tab_id = tab.id.clone();
-                    ui.set_width(close_button_width);
-                    ui.add_space(4.0);
-                    let close = egui::Button::new(self.icon_text(
-                        ICON_XMARK,
-                        self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0,
-                    ))
-                    .frame(false)
-                    .min_size(vec2(22.0, 20.0));
-                    let close = ui
-                        .add_enabled(can_close, close)
-                        .on_hover_text(self.text("tabs.close_hover").to_string());
-                    if close.clicked() {
-                        self.close_tab(pane.role, &tab_id);
+            // Render close button on the far right
+            let close_rect = Rect::from_min_size(
+                egui::pos2(rect.max.x - close_button_width, rect.min.y),
+                vec2(close_button_width, height)
+            );
+            ui.allocate_ui_at_rect(close_rect, |ui| {
+                ui.with_layout(Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                    let active_tab = pane
+                        .active
+                        .as_deref()
+                        .and_then(|id| pane.tabs.iter().find(|tab| tab.id == id));
+                    let can_close = active_tab
+                        .map(|tab| !tab.is_pinned && !tab.is_locked)
+                        .unwrap_or(false);
+                    
+                    if let Some(tab) = active_tab {
+                        let tab_id = tab.id.clone();
+                        let close = egui::Button::new(self.icon_text(
+                            ICON_XMARK,
+                            self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0,
+                        ))
+                        .frame(false)
+                        .min_size(vec2(22.0, 20.0));
+                        let close = ui
+                            .add_enabled(can_close, close)
+                            .on_hover_text(self.text("tabs.close_hover").to_string());
+                        if close.clicked() {
+                            self.close_tab(pane.role, &tab_id);
+                        }
                     }
-                } else {
-                    ui.set_width(close_button_width);
-                }
+                });
             });
         });
     }
@@ -6451,11 +6679,30 @@ impl App for RustNotePadApp {
         self.apply_theme_if_needed(ctx);
         self.status.refresh_from_layout(&self.layout);
 
+        let is_modal_open = self.show_settings_window || self.show_help_about_window;
+
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
         self.show_status_bar(ctx);
         self.show_bottom_dock(ctx);
         self.show_editor_area(ctx);
+
+        if is_modal_open {
+            egui::Area::new("modal_overlay")
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .interactable(true)
+                .order(egui::Order::Background)
+                .show(ctx, |ui| {
+                    let screen_rect = ctx.screen_rect();
+                    ui.painter().rect_filled(
+                        screen_rect,
+                        egui::Rounding::ZERO,
+                        Color32::from_black_alpha(100),
+                    );
+                    ui.allocate_rect(screen_rect, egui::Sense::click());
+                });
+        }
+
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
@@ -7558,30 +7805,24 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     None
 }
 
-fn load_icon_font() -> Option<(String, Vec<u8>)> {
+fn load_font_asset(filename: &str) -> Option<Vec<u8>> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.push(
-        manifest_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"),
-    );
-    candidates.push(
-        manifest_dir.join("../assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"),
-    );
-    candidates.push(PathBuf::from(
-        "assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf",
-    ));
+    candidates.push(manifest_dir.join(format!("assets/icon/otfs/{}", filename)));
+    candidates.push(manifest_dir.join(format!("../assets/icon/otfs/{}", filename)));
+    candidates.push(PathBuf::from(format!("assets/icon/otfs/{}", filename)));
     if let Some(exe_dir) = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
-        candidates.push(exe_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"));
+        candidates.push(exe_dir.join(format!("assets/icon/otfs/{}", filename)));
         candidates.push(
             exe_dir
                 .parent()
-                .map(|p| p.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf"))
-                .unwrap_or_else(|| exe_dir.join("assets/icon/otfs/Font Awesome 7 Free-Solid-900.otf")),
+                .map(|p| p.join(format!("assets/icon/otfs/{}", filename)))
+                .unwrap_or_else(|| exe_dir.join(format!("assets/icon/otfs/{}", filename))),
         );
     }
     for path in candidates {
         if let Ok(data) = fs::read(&path) {
-            return Some((ICON_FONT_NAME.to_string(), data));
+            return Some(data);
         }
     }
     None
@@ -7641,7 +7882,10 @@ fn main() -> eframe::Result<()> {
         launch_config.multi_instance
     ));
     let options = NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 760.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 760.0])
+            .with_decorations(false)
+            .with_transparent(true),
         ..Default::default()
     };
     let config_for_app = launch_config.clone();
