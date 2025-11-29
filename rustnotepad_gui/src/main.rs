@@ -5408,7 +5408,7 @@ impl RustNotePadApp {
     fn render_document_map_panel(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.set_min_height(height);
         ui.set_max_height(height);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             if self
                 .icon_button(
                     ui,
@@ -5435,14 +5435,14 @@ impl RustNotePadApp {
     fn document_map_snippet(line: &str, max_chars: usize) -> String {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            "…".to_string()
+            ".".to_string()
         } else {
             let mut result = String::new();
             for ch in trimmed.chars().take(max_chars) {
-                if ch == '\t' {
-                    result.push(' ');
-                } else {
+                if ch.is_whitespace() {
                     result.push(ch);
+                } else {
+                    result.push('.');
                 }
             }
             if trimmed.chars().count() > max_chars {
@@ -5745,52 +5745,30 @@ impl RustNotePadApp {
     }
 
     fn show_editor_area(&mut self, ctx: &egui::Context) {
+        if self.project_panel_visible {
+            egui::SidePanel::left("project_panel")
+                .resizable(true)
+                .default_width(PROJECT_PANEL_WIDTH)
+                .show(ctx, |ui| {
+                    let height = ui.available_height();
+                    self.render_project_panel(ui, height);
+                });
+        }
+
+        if self.document_map_visible {
+            egui::SidePanel::right("document_map_panel")
+                .resizable(true)
+                .default_width(DOCUMENT_MAP_WIDTH)
+                .show(ctx, |ui| {
+                    let height = ui.available_height();
+                    self.render_document_map_panel(ui, height);
+                });
+        }
+
         egui::CentralPanel::default()
             .frame(self.main_panel_frame(ctx))
             .show(ctx, |ui| {
-                let total_height = (ui.available_height() - STATUS_BAR_HEIGHT).max(0.0);
-                let total_width = ui.available_width();
-                ui.allocate_ui_with_layout(
-                    vec2(total_width, total_height),
-                    Layout::left_to_right(Align::Min),
-                    |ui| {
-                        if self.project_panel_visible {
-                            ui.allocate_ui_with_layout(
-                                vec2(PROJECT_PANEL_WIDTH, total_height),
-                                Layout::top_down(Align::Min),
-                                |ui| {
-                                    self.render_project_panel(ui, total_height);
-                                },
-                            );
-                            ui.separator();
-                        }
-
-                        let mut center_width = ui.available_width();
-                        if self.document_map_visible {
-                            center_width =
-                                (center_width - DOCUMENT_MAP_WIDTH - ui.spacing().item_spacing.x)
-                                    .max(0.0);
-                        }
-                        ui.allocate_ui_with_layout(
-                            vec2(center_width, total_height),
-                            Layout::top_down(Align::Min),
-                            |ui| {
-                                self.render_editor_panes(ui);
-                            },
-                        );
-
-                        if self.document_map_visible {
-                            ui.separator();
-                            ui.allocate_ui_with_layout(
-                                vec2(DOCUMENT_MAP_WIDTH, total_height),
-                                Layout::top_down(Align::Min),
-                                |ui| {
-                                    self.render_document_map_panel(ui, total_height);
-                                },
-                            );
-                        }
-                    },
-                );
+                self.render_editor_panes(ui);
             });
     }
 
@@ -6475,9 +6453,9 @@ impl App for RustNotePadApp {
 
         self.show_menu_bar(ctx);
         self.show_toolbar(ctx);
+        self.show_status_bar(ctx);
         self.show_bottom_dock(ctx);
         self.show_editor_area(ctx);
-        self.show_status_bar(ctx);
         self.render_settings_window(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
