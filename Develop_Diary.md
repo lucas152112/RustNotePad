@@ -1,5 +1,12 @@
 # Develop Diary / 開發日誌
 
+## 2025-12-05
+
+### 完成 / Completed
+- 導入 Notepad++ 風格的尋找/取代視窗：以 `SearchEngine` 驅動實際搜尋、計數與「在目前文件中尋找全部」，同時在底部停靠區呈現可點擊的結果樹，點擊即可反向帶出編輯器選取。 / Added the Notepad++ style Find/Replace dialog powered by `SearchEngine`, enabling real find, count, and “Find All in Current Document” actions plus a clickable Find Results tree in the bottom dock that jumps the editor selection to each hit.
+- 針對尋找介面與結果面板補齊英文/正體中文字串，並提供 `localized_text` 後援以便第三方語系尚未補齊新鍵時也能顯示雙語預設，確保 UI 一致。 / Filled in English and Traditional Chinese strings for the find UI/result panel and introduced a `localized_text` helper so community language packs that lack the new keys fall back to our bilingual defaults, keeping the UI consistent.
+
+
 ## 2025-11-29
 
 ### 完成 / Completed
