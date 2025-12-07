@@ -84,6 +84,18 @@ pub struct EditorPreferences {
     pub show_line_numbers: bool,
     #[serde(default = "default_true")]
     pub highlight_active_line: bool,
+    #[serde(default = "default_editor_font_family")]
+    pub editor_font_family: String,
+    #[serde(default = "default_editor_font_size")]
+    pub editor_font_size: u32,
+}
+
+fn default_editor_font_family() -> String {
+    "monospace".to_string()
+}
+
+fn default_editor_font_size() -> u32 {
+    12
 }
 
 fn default_true() -> bool {
@@ -101,6 +113,8 @@ impl Default for EditorPreferences {
             autosave_interval_minutes: default_autosave_interval(),
             show_line_numbers: true,
             highlight_active_line: true,
+            editor_font_family: default_editor_font_family(),
+            editor_font_size: default_editor_font_size(),
         }
     }
 }
@@ -111,6 +125,13 @@ impl EditorPreferences {
             self.autosave_interval_minutes = default_autosave_interval();
         }
         self.autosave_interval_minutes = self.autosave_interval_minutes.clamp(1, 240);
+        if self.editor_font_family.trim().is_empty() {
+            self.editor_font_family = default_editor_font_family();
+        }
+        if self.editor_font_size == 0 {
+            self.editor_font_size = default_editor_font_size();
+        }
+        self.editor_font_size = self.editor_font_size.clamp(6, 72);
     }
 }
 

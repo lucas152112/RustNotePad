@@ -1,5 +1,13 @@
 # Develop Diary / 開發日誌
 
+## 2025-12-08
+
+### 完成 / Completed
+- 新增字形設定功能：在設定 → 偏好設定中加入字形家族與字形大小選項，提供 25+ 種常用等寬字型供選擇（Monospace、Consolas、Fira Code、JetBrains Mono 等），字形大小支援 6-72 pt 即時調整。 / Added font settings: introduced font family and font size options in Settings → Preferences with 25+ common monospace fonts (Monospace, Consolas, Fira Code, JetBrains Mono, etc.), and font size ranging from 6-72 pt with immediate effect.
+- 實作字形切換重啟提示：當使用者變更字形家族時，顯示對話框詢問是否立即重啟應用程式以套用新字形，避免 egui 框架無法在執行時期動態載入字型的限制。 / Implemented font change restart prompt: when the user changes the font family, a dialog appears asking whether to restart the application immediately to apply the new font, addressing egui's limitation of not supporting runtime font loading.
+- 新增編輯器滑鼠行高亮功能：當滑鼠游標移動至編輯區時，自動以半透明灰色背景高亮顯示游標所在行，提升程式碼閱讀體驗。 / Added editor mouse hover line highlighting: when the mouse cursor moves over the editor area, the line under the cursor is automatically highlighted with a semi-transparent gray background, improving code reading experience.
+- 補齊字形設定相關的英文/正體中文本地化字串，包含標題、標籤、提示與重啟對話框文案。 / Added English and Traditional Chinese localization strings for font settings, including headings, labels, hints, and restart dialog messages.
+
 ## 2025-12-05
 
 ### 完成 / Completed

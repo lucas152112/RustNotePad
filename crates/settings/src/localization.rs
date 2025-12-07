@@ -212,6 +212,11 @@ const DEFAULT_STRINGS: &[(&str, &str)] = &[
     ("settings.preferences.autosave_suffix", " min"),
     ("settings.preferences.line_numbers", "Show line numbers"),
     ("settings.preferences.highlight_line", "Highlight active line"),
+    ("settings.preferences.font_heading", "Editor Font"),
+    ("settings.preferences.font_family_label", "Font Family"),
+    ("settings.preferences.font_family_hint", "Requires restart to apply"),
+    ("settings.preferences.font_size_label", "Font Size"),
+    ("settings.preferences.font_size_suffix", " pt"),
     ("settings.preferences.localization_heading", "Localization"),
     ("settings.preferences.localization_label", "Select interface language"),
     (

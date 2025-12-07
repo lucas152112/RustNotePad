@@ -89,8 +89,10 @@ const APP_TITLE: &str = "RustNotePad – UI Preview";
 const ICON_FONT_NAME: &str = "Font Awesome";
 const ICON_XMARK: &str = "\u{f410}"; // Window Close Regular
 const ICON_FOLDER: &str = "\u{f07b}";
-const ICON_FOLDER_TREE: &str = "\u{f802}";
+const ICON_FOLDER_TREE: &str = "\u{f07b}"; // Using same folder icon as fallback
+#[allow(dead_code)]
 const ICON_RELOAD: &str = "\u{f01e}";
+#[allow(dead_code)]
 const ICON_FLOPPY: &str = "\u{f0c7}";
 const ICON_FILE_NEW: &str = "\u{f016}";
 const ICON_FOLDER_OPEN: &str = "\u{f07c}";
@@ -1750,6 +1752,8 @@ struct RustNotePadApp {
     icon_font_available: bool,
     cjk_font_available: bool,
     font_warning: Option<String>,
+    available_monospace_fonts: Vec<String>,
+    show_font_restart_dialog: bool,
     highlight_registry: LanguageRegistry,
     function_registry: ParserRegistry,
     project_tree: ProjectTree,
@@ -2155,6 +2159,8 @@ impl RustNotePadApp {
             icon_font_available: false,
             cjk_font_available: false,
             font_warning: None,
+            available_monospace_fonts: get_available_monospace_fonts(),
+            show_font_restart_dialog: false,
             highlight_registry,
             function_registry,
             project_tree,
@@ -4954,6 +4960,7 @@ impl RustNotePadApp {
             .into_owned()
     }
 
+    #[allow(dead_code)]
     fn workspace_display_name(&self) -> String {
         self.workspace_root
             .file_name()
@@ -5753,30 +5760,6 @@ impl RustNotePadApp {
                         }
                     }
 
-                    if self.project_panel_visible {
-                        let workspace_label = format!(
-                            "{}: {}",
-                            self.text("toolbar.workspace_prefix"),
-                            self.workspace_display_name()
-                        );
-                        ui.label(RichText::new(workspace_label).strong());
-                        ui.separator();
-
-                        let mut ratio = self.layout.split_ratio;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut ratio, 0.3..=0.7)
-                                    .prefix(self.text("toolbar.split_prefix").to_string())
-                                    .show_value(false),
-                            )
-                            .changed()
-                        {
-                            if let Ok(valid) = LayoutConfig::validate_split_ratio(ratio) {
-                                self.layout.split_ratio = valid;
-                            }
-                        }
-                    }
-
                     // ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     //     let pinned_count = self.layout.pinned_tabs().len();
                     //     ui.label(
@@ -5802,7 +5785,6 @@ impl RustNotePadApp {
             .max_height(height)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading(self.text("panel.project.title"));
                     ui.allocate_ui_with_layout(
                         ui.available_size(),
                         Layout::right_to_left(Align::Center),
@@ -5820,42 +5802,61 @@ impl RustNotePadApp {
                         },
                     );
                 });
-                ui.separator();
-                if self
-                    .icon_button(
-                        ui,
-                        ICON_RELOAD,
-                        &self.localized(
-                            "Reload project tree from disk",
-                            "從磁碟重新載入專案樹",
-                        ),
-                    )
+
+                // Navigation entry: "." - navigate to filesystem root
+                if ui
+                    .selectable_label(false, ".")
+                    .on_hover_text(self.localized(
+                        "Navigate to filesystem root",
+                        "切換到檔案系統根目錄",
+                    ))
                     .clicked()
                 {
-                    let tree = build_filesystem_project_tree(&self.workspace_root, 4, 200);
+                    let root_path = if cfg!(windows) {
+                        PathBuf::from("C:\\")
+                    } else {
+                        PathBuf::from("/")
+                    };
+                    let tree = build_filesystem_project_tree(&root_path, 4, 200);
                     if let Err(err) = self.project_tree_store.save(&tree) {
                         log_warn(format!("Failed to persist project tree: {err}"));
                     }
                     self.project_tree = tree;
+                    self.workspace_root = root_path;
                     log_info(self.localized_owned(
-                        "Project tree refreshed".to_string(),
-                        "專案樹已重新整理".to_string(),
+                        "Navigated to filesystem root".to_string(),
+                        "已切換到檔案系統根目錄".to_string(),
                     ));
                 }
-                if self
-                    .icon_button(
-                        ui,
-                        ICON_FLOPPY,
-                        &self.localized(
-                            "Flush session snapshot to disk",
-                            "將工作階段寫入磁碟",
-                        ),
-                    )
+
+                // Navigation entry: ".." - navigate to parent directory
+                if ui
+                    .selectable_label(false, "..")
+                    .on_hover_text(self.localized(
+                        "Navigate to parent directory",
+                        "返回上層目錄",
+                    ))
                     .clicked()
                 {
-                    self.persist_session();
+                    if let Some(parent_path) = self.workspace_root.parent().map(|p| p.to_path_buf()) {
+                        let tree = build_filesystem_project_tree(&parent_path, 4, 200);
+                        if let Err(err) = self.project_tree_store.save(&tree) {
+                            log_warn(format!("Failed to persist project tree: {err}"));
+                        }
+                        self.project_tree = tree;
+                        self.workspace_root = parent_path;
+                        log_info(self.localized_owned(
+                            "Navigated to parent directory".to_string(),
+                            "已返回上層目錄".to_string(),
+                        ));
+                    } else {
+                        log_info(self.localized_owned(
+                            "Already at filesystem root".to_string(),
+                            "已在檔案系統根目錄".to_string(),
+                        ));
+                    }
                 }
-                ui.add_space(6.0);
+
                 let root_children = self.project_tree.root.children.clone();
                 for child in root_children.iter() {
                     self.render_project_node(ui, child, 0);
@@ -6345,6 +6346,10 @@ impl RustNotePadApp {
     }
 
     fn render_editor_panes(&mut self, ui: &mut egui::Ui) {
+        // Extract font settings to use in nested closures
+        let editor_font_size = self.preferences.editor_font_size as f32;
+        let editor_line_height = editor_font_size + 4.0;
+        
         let primary_snapshot = self
             .layout
             .panes
@@ -6394,64 +6399,165 @@ impl RustNotePadApp {
                                             let previous_text = self.editor_preview.clone();
                                             let mut buffer = previous_text.clone();
 
-                                            let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
-                                                let mut layout_job = egui::text::LayoutJob::default();
-                                                let font_id = egui::FontId::monospace(12.0);
-                                                let color = ui.visuals().text_color();
-                                                layout_job.append(
-                                                    string,
-                                                    0.0,
-                                                    egui::text::TextFormat {
-                                                        font_id,
-                                                        color,
-                                                        line_height: Some(16.0), // 12.0 + 4.0 spacing
-                                                        ..Default::default()
-                                                    },
-                                                );
-                                                layout_job.wrap.max_width = wrap_width;
-                                                ui.fonts(|f| f.layout_job(layout_job))
-                                            };
+                                            // Calculate line count for line numbers
+                                            let line_count = buffer.lines().count().max(1);
+                                            // Scale line number width based on font size
+                                            let char_width_approx = editor_font_size * 0.6;
+                                            let line_number_width = format!("{}", line_count).len() as f32 * char_width_approx + 16.0;
 
-                                            let output = egui::ScrollArea::both()
-                                                .id_source("editor_scroll_area")
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    let text_edit = egui::TextEdit::multiline(&mut buffer)
-                                                        .id_source("primary_editor")
-                                                        .layouter(&mut layouter)
-                                                        .desired_width(f32::INFINITY)
-                                                        .desired_rows(1) // Let it grow
-                                                        .lock_focus(true)
-                                                        .frame(false); // Modern look: no internal frame
-                                                    text_edit.show(ui)
-                                                })
-                                                .inner;
+                                            // Check if horizontal scrollbar is needed
+                                            let max_line_len = buffer.lines().map(|l| l.len()).max().unwrap_or(0);
+                                            let content_width = max_line_len as f32 * char_width_approx;
+                                            let available_text_width = ui.available_width() - line_number_width - 20.0;
+                                            let needs_horizontal_scroll = content_width > available_text_width;
 
-                                            if output.response.changed()
-                                                && buffer != previous_text
-                                            {
-                                                self.record_undo_snapshot(previous_text);
-                                                self.editor_redo_stack.clear();
-                                                self.apply_editor_text(buffer);
-                                            }
+                                            // Check if vertical scrollbar is needed
+                                            let content_height = line_count as f32 * editor_line_height;
+                                            let panel_available_height = ui.available_height();
+                                            let needs_vertical_scroll = content_height > panel_available_height;
 
-                                            let mut current_selection = output
-                                                .cursor_range
-                                                .map(|range| range.as_ccursor_range());
+                                            // Get full available size for editor area
+                                            let full_width = ui.available_width();
+                                            let full_height = ui.available_height();
 
-                                            if let Some(pending) =
-                                                self.pending_editor_selection.take()
-                                            {
-                                                let mut state = output.state.clone();
-                                                state.set_ccursor_range(Some(pending));
-                                                state.store(ui.ctx(), output.response.id);
-                                                current_selection = Some(pending);
-                                            }
+                                            ui.allocate_ui_with_layout(
+                                                vec2(full_width, full_height),
+                                                Layout::left_to_right(Align::Min),
+                                                |ui| {
+                                                    // Line numbers panel (left side)
+                                                    ui.allocate_ui_with_layout(
+                                                        vec2(line_number_width, full_height),
+                                                        Layout::top_down(Align::Max),
+                                                        |ui| {
+                                                            ui.set_min_height(full_height);
+                                                            let gutter_bg = Color32::from_rgb(45, 45, 48);
+                                                            let gutter_text = Color32::from_rgb(140, 140, 140);
+                                                            
+                                                            egui::Frame::none()
+                                                                .fill(gutter_bg)
+                                                                .inner_margin(Margin::symmetric(4.0, 0.0))
+                                                                .show(ui, |ui| {
+                                                                    egui::ScrollArea::vertical()
+                                                                        .id_source("line_numbers_scroll")
+                                                                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                                                                        .auto_shrink([false, false])
+                                                                        .show(ui, |ui| {
+                                                                            for line_num in 1..=line_count {
+                                                                                ui.label(
+                                                                                    RichText::new(format!("{}", line_num))
+                                                                                        .monospace()
+                                                                                        .size(editor_font_size)
+                                                                                        .color(gutter_text)
+                                                                                );
+                                                                            }
+                                                                        });
+                                                                });
+                                                        },
+                                                    );
 
-                                            if current_selection.is_none() {
-                                                current_selection = self.editor_selection;
-                                            }
-                                            self.update_editor_selection(current_selection);
+                                                    // Editor text area (right side) - fill remaining space
+                                                    let editor_width = ui.available_width();
+                                                    ui.allocate_ui_with_layout(
+                                                        vec2(editor_width, full_height),
+                                                        Layout::top_down(Align::Min),
+                                                        |ui| {
+                                                            ui.set_min_height(full_height);
+                                                            
+                                                            let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
+                                                                let mut layout_job = egui::text::LayoutJob::default();
+                                                                let font_id = egui::FontId::monospace(editor_font_size);
+                                                                let color = ui.visuals().text_color();
+                                                                layout_job.append(
+                                                                    string,
+                                                                    0.0,
+                                                                    egui::text::TextFormat {
+                                                                        font_id,
+                                                                        color,
+                                                                        line_height: Some(editor_line_height),
+                                                                        ..Default::default()
+                                                                    },
+                                                                );
+                                                                layout_job.wrap.max_width = wrap_width;
+                                                                ui.fonts(|f| f.layout_job(layout_job))
+                                                            };
+
+                                                            // Smart scrollbars based on content size
+                                                            let scroll_area = if needs_horizontal_scroll && needs_vertical_scroll {
+                                                                egui::ScrollArea::both()
+                                                            } else if needs_horizontal_scroll {
+                                                                egui::ScrollArea::horizontal()
+                                                            } else if needs_vertical_scroll {
+                                                                egui::ScrollArea::vertical()
+                                                            } else {
+                                                                egui::ScrollArea::neither()
+                                                            };
+
+                                                            let scroll_output = scroll_area
+                                                                .id_source("editor_scroll_area")
+                                                                .auto_shrink([false, false])
+                                                                .show(ui, |ui| {
+                                                                    // Get scroll offset and content rect for line highlighting
+                                                                    let content_rect = ui.max_rect();
+                                                                    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                                                                    
+                                                                    // Draw line highlight background if hovering over editor content
+                                                                    if let Some(pos) = hover_pos {
+                                                                        if content_rect.contains(pos) {
+                                                                            let relative_y = pos.y - content_rect.top();
+                                                                            let line_idx = (relative_y / editor_line_height).floor() as usize;
+                                                                            if line_idx < line_count {
+                                                                                let highlight_color = Color32::from_rgba_unmultiplied(128, 128, 128, 50);
+                                                                                let line_top = content_rect.top() + (line_idx as f32 * editor_line_height);
+                                                                                let line_rect = Rect::from_min_size(
+                                                                                    egui::pos2(content_rect.left(), line_top),
+                                                                                    vec2(content_rect.width(), editor_line_height),
+                                                                                );
+                                                                                ui.painter().rect_filled(line_rect, 0.0, highlight_color);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    
+                                                                    let text_edit = egui::TextEdit::multiline(&mut buffer)
+                                                                        .id_source("primary_editor")
+                                                                        .layouter(&mut layouter)
+                                                                        .desired_width(f32::INFINITY)
+                                                                        .desired_rows(1) // Let it grow
+                                                                        .lock_focus(true)
+                                                                        .frame(false); // Modern look: no internal frame
+                                                                    text_edit.show(ui)
+                                                                });
+                                                            
+                                                            let output = scroll_output.inner;
+
+                                                            if output.response.changed()
+                                                                && buffer != previous_text
+                                                            {
+                                                                self.record_undo_snapshot(previous_text.clone());
+                                                                self.editor_redo_stack.clear();
+                                                                self.apply_editor_text(buffer);
+                                                            }
+
+                                                            let mut current_selection = output
+                                                                .cursor_range
+                                                                .map(|range| range.as_ccursor_range());
+
+                                                            if let Some(pending) =
+                                                                self.pending_editor_selection.take()
+                                                            {
+                                                                let mut state = output.state.clone();
+                                                                state.set_ccursor_range(Some(pending));
+                                                                state.store(ui.ctx(), output.response.id);
+                                                                current_selection = Some(pending);
+                                                            }
+
+                                                            if current_selection.is_none() {
+                                                                current_selection = self.editor_selection;
+                                                            }
+                                                            self.update_editor_selection(current_selection);
+                                                        },
+                                                    );
+                                                },
+                                            ); // end allocate_ui_with_layout
                                         });
                                 },
                             );
@@ -7088,6 +7194,7 @@ impl App for RustNotePadApp {
         }
 
         self.render_settings_window(ctx);
+        self.render_font_restart_dialog(ctx);
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
         self.render_help_windows(ctx);
@@ -7469,6 +7576,66 @@ impl RustNotePadApp {
         }
         ui.add_space(12.0);
 
+        // Font settings section
+        ui.separator();
+        ui.heading(
+            self.text("settings.preferences.font_heading")
+                .to_string(),
+        );
+        
+        // Font family selector (requires restart)
+        ui.horizontal(|ui| {
+            ui.label(
+                self.text("settings.preferences.font_family_label")
+                    .to_string(),
+            );
+            let current_font = self.preferences.editor_font_family.clone();
+            egui::ComboBox::from_id_source("preferences_font_family_selector")
+                .width(220.0)
+                .selected_text(&current_font)
+                .show_ui(ui, |ui| {
+                    for font_name in &self.available_monospace_fonts {
+                        let selected = font_name == &self.preferences.editor_font_family;
+                        if ui.selectable_label(selected, font_name).clicked() {
+                            if font_name != &self.preferences.editor_font_family {
+                                self.preferences.editor_font_family = font_name.clone();
+                                self.preferences_dirty = true;
+                                self.show_font_restart_dialog = true;
+                            }
+                        }
+                    }
+                });
+        });
+        ui.label(
+            RichText::new(self.text("settings.preferences.font_family_hint").to_string())
+                .small()
+                .italics()
+                .color(Color32::GRAY),
+        );
+        
+        // Font size selector (this works immediately)
+        let font_size_suffix = self
+            .text("settings.preferences.font_size_suffix")
+            .to_string();
+        ui.horizontal(|ui| {
+            ui.label(
+                self.text("settings.preferences.font_size_label")
+                    .to_string(),
+            );
+            if ui
+                .add(
+                    egui::DragValue::new(&mut self.preferences.editor_font_size)
+                        .clamp_range(6..=72)
+                        .speed(1.0)
+                        .suffix(font_size_suffix),
+                )
+                .changed()
+            {
+                self.preferences_dirty = true;
+            }
+        });
+        ui.add_space(12.0);
+
         // Render locale selector similar to Notepad++ preferences panel.
         // （仿照 Notepad++ 偏好設定面板呈現語系選擇器。）
         ui.separator();
@@ -7601,6 +7768,56 @@ impl RustNotePadApp {
         ui.heading(self.text("settings.placeholder.heading").to_string());
         ui.separator();
         ui.label(self.text(key).to_string());
+    }
+
+    fn render_font_restart_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_font_restart_dialog {
+            return;
+        }
+        
+        let mut open = self.show_font_restart_dialog;
+        let mut should_restart = false;
+        let mut should_close = false;
+        
+        egui::Window::new(self.localized("Font Changed", "字型已變更"))
+            .collapsible(false)
+            .resizable(false)
+            .frame(self.window_frame(ctx))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(300.0);
+                ui.label(self.localized(
+                    "Font family change requires a restart to take effect.\nWould you like to restart now?",
+                    "字型變更需要重新啟動才會生效。\n是否要立即重新啟動？",
+                ));
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(self.localized("Restart Now", "立即重啟")).clicked() {
+                        should_restart = true;
+                    }
+                    if ui.button(self.localized("Later", "稍後")).clicked() {
+                        should_close = true;
+                    }
+                });
+            });
+        
+        if should_restart {
+            // Save preferences before restart
+            self.persist_preferences_if_dirty();
+            // Restart the application
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(&exe)
+                    .args(std::env::args().skip(1))
+                    .spawn();
+            }
+            std::process::exit(0);
+        }
+        
+        if should_close || !open {
+            self.show_font_restart_dialog = false;
+        }
     }
 
     fn render_file_dialogs(&mut self, ctx: &egui::Context) {
@@ -8468,6 +8685,48 @@ fn load_font_asset(filename: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// Retrieves a list of available monospace fonts.
+/// Returns a curated list of common monospace font family names that the user can choose from.
+/// Font family changes require a restart to take effect.
+fn get_available_monospace_fonts() -> Vec<String> {
+    let mut fonts = vec![
+        // Default system monospace
+        "monospace".to_string(),
+        // Popular programming fonts
+        "Cascadia Code".to_string(),
+        "Cascadia Mono".to_string(),
+        "Consolas".to_string(),
+        "Courier New".to_string(),
+        "DejaVu Sans Mono".to_string(),
+        "Droid Sans Mono".to_string(),
+        "Fira Code".to_string(),
+        "Fira Mono".to_string(),
+        "Hack".to_string(),
+        "IBM Plex Mono".to_string(),
+        "Inconsolata".to_string(),
+        "JetBrains Mono".to_string(),
+        "Liberation Mono".to_string(),
+        "Menlo".to_string(),
+        "Monaco".to_string(),
+        "Noto Mono".to_string(),
+        "Noto Sans Mono".to_string(),
+        "Roboto Mono".to_string(),
+        "SF Mono".to_string(),
+        "Source Code Pro".to_string(),
+        "Ubuntu Mono".to_string(),
+        // CJK monospace fonts
+        "Microsoft YaHei Mono".to_string(),
+        "Noto Sans Mono CJK TC".to_string(),
+        "PingFang SC".to_string(),
+        "Sarasa Mono TC".to_string(),
+        "Sarasa Term TC".to_string(),
+    ];
+    
+    fonts.sort();
+    fonts.dedup();
+    fonts
+}
+
 fn main() -> eframe::Result<()> {
     install_panic_logger();
     if let Err(err) = configure_winit_backend() {
@@ -9220,6 +9479,8 @@ struct PreferencesState {
     autosave_interval_minutes: u32,
     show_line_numbers: bool,
     highlight_active_line: bool,
+    editor_font_family: String,
+    editor_font_size: u32,
 }
 
 impl Default for PreferencesState {
@@ -9229,6 +9490,8 @@ impl Default for PreferencesState {
             autosave_interval_minutes: 5,
             show_line_numbers: true,
             highlight_active_line: true,
+            editor_font_family: "monospace".to_string(),
+            editor_font_size: 12,
         }
     }
 }
@@ -9240,6 +9503,8 @@ impl From<&Preferences> for PreferencesState {
             autosave_interval_minutes: prefs.editor.autosave_interval_minutes,
             show_line_numbers: prefs.editor.show_line_numbers,
             highlight_active_line: prefs.editor.highlight_active_line,
+            editor_font_family: prefs.editor.editor_font_family.clone(),
+            editor_font_size: prefs.editor.editor_font_size,
         }
     }
 }
@@ -9250,6 +9515,8 @@ impl PreferencesState {
         prefs.editor.autosave_interval_minutes = self.autosave_interval_minutes;
         prefs.editor.show_line_numbers = self.show_line_numbers;
         prefs.editor.highlight_active_line = self.highlight_active_line;
+        prefs.editor.editor_font_family = self.editor_font_family.clone();
+        prefs.editor.editor_font_size = self.editor_font_size;
     }
 }
 

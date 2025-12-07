@@ -3314,6 +3314,7 @@ dependencies = [
  "rustnotepad_printing",
  "rustnotepad_project",
  "rustnotepad_runexec",
+ "rustnotepad_search",
  "rustnotepad_settings",
  "serde_json",
  "tempfile",
