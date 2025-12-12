@@ -85,7 +85,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(all(unix, not(target_os = "macos")))]
 use x11rb::xcb_ffi::XCBConnection;
 
-const APP_TITLE: &str = "RustNotePad – UI Preview";
+const APP_TITLE: &str = "RNotePad++";
 const ICON_FONT_NAME: &str = "Font Awesome";
 const ICON_XMARK: &str = "\u{f410}"; // Window Close Regular
 const ICON_FOLDER: &str = "\u{f07b}";
@@ -1679,7 +1679,15 @@ impl StatusBarState {
 
     fn refresh_cursor(&mut self, contents: &str) {
         self.length = contents.chars().count();
-        self.lines = contents.split('\n').count().max(1);
+        // Count lines: newlines + 1, but don't count trailing empty line from final newline
+        let newline_count = contents.chars().filter(|&c| c == '\n').count();
+        self.lines = if contents.is_empty() {
+            1
+        } else if contents.ends_with('\n') {
+            newline_count.max(1)  // Don't add 1 for trailing newline
+        } else {
+            newline_count + 1  // Add 1 for the last line without newline
+        };
         let caret_index = self.caret_char_index.min(self.length);
         let (line, column) = Self::line_column_from_index(contents, caret_index);
         self.line = line;
@@ -1751,6 +1759,7 @@ struct RustNotePadApp {
     fonts_installed: bool,
     icon_font_available: bool,
     cjk_font_available: bool,
+    editor_font_loaded: bool,
     font_warning: Option<String>,
     available_monospace_fonts: Vec<String>,
     show_font_restart_dialog: bool,
@@ -2158,6 +2167,7 @@ impl RustNotePadApp {
             fonts_installed: false,
             icon_font_available: false,
             cjk_font_available: false,
+            editor_font_loaded: false,
             font_warning: None,
             available_monospace_fonts: get_available_monospace_fonts(),
             show_font_restart_dialog: false,
@@ -5491,7 +5501,7 @@ impl RustNotePadApp {
                 family.insert(0, name.clone());
             }
             if let Some(family) = definitions.families.get_mut(&FontFamily::Monospace) {
-                family.push(name);
+                family.push(name.clone());
             }
             self.cjk_font_available = true;
             self.font_warning = None;
@@ -5506,6 +5516,10 @@ impl RustNotePadApp {
         } else {
             self.cjk_font_available = false;
         }
+
+        // Editor font loading is currently disabled
+        // TODO: Implement proper system font loading
+        self.editor_font_loaded = false;
 
         ctx.set_fonts(definitions);
         if self.icon_font_available {
@@ -6348,7 +6362,8 @@ impl RustNotePadApp {
     fn render_editor_panes(&mut self, ui: &mut egui::Ui) {
         // Extract font settings to use in nested closures
         let editor_font_size = self.preferences.editor_font_size as f32;
-        let editor_line_height = editor_font_size + 4.0;
+        // Use 1.35x line height for balanced CJK character support
+        let editor_line_height = (editor_font_size * 1.35).round();
         
         let primary_snapshot = self
             .layout
@@ -6400,7 +6415,17 @@ impl RustNotePadApp {
                                             let mut buffer = previous_text.clone();
 
                                             // Calculate line count for line numbers
-                                            let line_count = buffer.lines().count().max(1);
+                                            // Count newlines + 1, but don't count trailing empty line from final newline
+                                            let line_count = {
+                                                let count = buffer.chars().filter(|&c| c == '\n').count();
+                                                if buffer.is_empty() {
+                                                    1
+                                                } else if buffer.ends_with('\n') {
+                                                    count.max(1)  // Don't add 1 for trailing newline
+                                                } else {
+                                                    count + 1  // Add 1 for the last line without newline
+                                                }
+                                            };
                                             // Scale line number width based on font size
                                             let char_width_approx = editor_font_size * 0.6;
                                             let line_number_width = format!("{}", line_count).len() as f32 * char_width_approx + 16.0;
@@ -6418,42 +6443,51 @@ impl RustNotePadApp {
 
                                             // Get full available size for editor area
                                             let full_width = ui.available_width();
-                                            let full_height = ui.available_height();
+                                            // Adjust height to be exactly a multiple of line height
+                                            // This ensures only complete lines are visible (no partial lines at bottom)
+                                            let raw_height = ui.available_height();
+                                            let visible_lines = (raw_height / editor_line_height).floor();
+                                            let full_height = visible_lines * editor_line_height;
 
                                             ui.allocate_ui_with_layout(
                                                 vec2(full_width, full_height),
                                                 Layout::left_to_right(Align::Min),
                                                 |ui| {
-                                                    // Line numbers panel (left side)
-                                                    ui.allocate_ui_with_layout(
+                                                    // Clip to exact height to prevent partial lines at bottom
+                                                    let editor_area_rect = ui.available_rect_before_wrap();
+                                                    let clipped_rect = Rect::from_min_size(
+                                                        editor_area_rect.min,
+                                                        vec2(editor_area_rect.width(), full_height),
+                                                    );
+                                                    ui.set_clip_rect(clipped_rect);
+                                                    
+                                                    // Store editor_line_height and line_count for gutter to use
+                                                    // These will be used after editor renders to sync line numbers
+                                                    let gutter_line_height = editor_line_height;
+                                                    let gutter_line_count = line_count;
+                                                    let gutter_font_size = editor_font_size;
+                                                    
+                                                    // Line numbers panel (left side) - will be synced with editor scroll
+                                                    let gutter_response = ui.allocate_ui_with_layout(
                                                         vec2(line_number_width, full_height),
                                                         Layout::top_down(Align::Max),
                                                         |ui| {
                                                             ui.set_min_height(full_height);
                                                             let gutter_bg = Color32::from_rgb(45, 45, 48);
                                                             let gutter_text = Color32::from_rgb(140, 140, 140);
+                                                            let gutter_hover_text = Color32::from_rgb(220, 220, 220);
+                                                            let gutter_highlight = Color32::from_rgba_unmultiplied(100, 149, 237, 80);
                                                             
-                                                            egui::Frame::none()
-                                                                .fill(gutter_bg)
-                                                                .inner_margin(Margin::symmetric(4.0, 0.0))
-                                                                .show(ui, |ui| {
-                                                                    egui::ScrollArea::vertical()
-                                                                        .id_source("line_numbers_scroll")
-                                                                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                                                                        .auto_shrink([false, false])
-                                                                        .show(ui, |ui| {
-                                                                            for line_num in 1..=line_count {
-                                                                                ui.label(
-                                                                                    RichText::new(format!("{}", line_num))
-                                                                                        .monospace()
-                                                                                        .size(editor_font_size)
-                                                                                        .color(gutter_text)
-                                                                                );
-                                                                            }
-                                                                        });
-                                                                });
+                                                            let gutter_rect = ui.available_rect_before_wrap();
+                                                            
+                                                            // Fill background
+                                                            ui.painter().rect_filled(gutter_rect, 0.0, gutter_bg);
+                                                            
+                                                            // Return the rect for later use
+                                                            (gutter_rect, gutter_text, gutter_hover_text, gutter_highlight)
                                                         },
                                                     );
+                                                    let (gutter_rect, gutter_text, gutter_hover_text, gutter_highlight) = gutter_response.inner;
 
                                                     // Editor text area (right side) - fill remaining space
                                                     let editor_width = ui.available_width();
@@ -6463,8 +6497,9 @@ impl RustNotePadApp {
                                                         |ui| {
                                                             ui.set_min_height(full_height);
                                                             
-                                                            let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
+                                                            let mut layouter = |ui: &egui::Ui, string: &str, _wrap_width: f32| {
                                                                 let mut layout_job = egui::text::LayoutJob::default();
+                                                                // Use system monospace font
                                                                 let font_id = egui::FontId::monospace(editor_font_size);
                                                                 let color = ui.visuals().text_color();
                                                                 layout_job.append(
@@ -6474,13 +6509,16 @@ impl RustNotePadApp {
                                                                         font_id,
                                                                         color,
                                                                         line_height: Some(editor_line_height),
+                                                                        valign: egui::Align::Center,  // Center text vertically within line height
+                                                                        extra_letter_spacing: 1.5,    // Add spacing between characters
                                                                         ..Default::default()
                                                                     },
                                                                 );
-                                                                layout_job.wrap.max_width = wrap_width;
+                                                                // Disable word wrap - each line stays on one line
+                                                                // Use horizontal scrollbar instead of wrapping
+                                                                layout_job.wrap.max_width = f32::INFINITY;
                                                                 ui.fonts(|f| f.layout_job(layout_job))
                                                             };
-
                                                             // Smart scrollbars based on content size
                                                             let scroll_area = if needs_horizontal_scroll && needs_vertical_scroll {
                                                                 egui::ScrollArea::both()
@@ -6492,6 +6530,11 @@ impl RustNotePadApp {
                                                                 egui::ScrollArea::neither()
                                                             };
 
+                                                            // Set scroll step to line height for snapping to whole lines
+                                                            let scroll_area = scroll_area
+                                                                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                                                                .max_height(full_height);
+
                                                             let scroll_output = scroll_area
                                                                 .id_source("editor_scroll_area")
                                                                 .auto_shrink([false, false])
@@ -6499,23 +6542,55 @@ impl RustNotePadApp {
                                                                     // Get scroll offset and content rect for line highlighting
                                                                     let content_rect = ui.max_rect();
                                                                     let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                                                                    let clip_rect = ui.clip_rect();
+                                                                    
+                                                                    // Calculate scroll offset to determine which lines are visible
+                                                                    let scroll_offset = clip_rect.top() - content_rect.top();
+                                                                    
+                                                                    // Calculate the Y position where the last complete line ends
+                                                                    // First visible line index (may be partially visible at top)
+                                                                    let first_visible_line_idx = (scroll_offset / editor_line_height).floor();
+                                                                    let first_line_top = content_rect.top() + first_visible_line_idx * editor_line_height;
+                                                                    
+                                                                    // Calculate how many complete lines fit from the first visible line's top
+                                                                    let visible_from_first_line = clip_rect.bottom() - first_line_top;
+                                                                    let complete_lines_count = (visible_from_first_line / editor_line_height).floor();
+                                                                    
+                                                                    // The Y where complete lines end
+                                                                    let complete_lines_bottom = first_line_top + complete_lines_count * editor_line_height;
                                                                     
                                                                     // Draw line highlight background if hovering over editor content
+                                                                    // Check if another layer (menu, popup, tooltip) is above the pointer
+                                                                    let current_layer = ui.layer_id();
+                                                                    let layer_is_top = hover_pos.map_or(false, |pos| {
+                                                                        let top_layer = ui.ctx().layer_id_at(pos);
+                                                                        top_layer.map_or(true, |l| l == current_layer)
+                                                                    });
+                                                                    
+                                                                    if layer_is_top {
                                                                     if let Some(pos) = hover_pos {
-                                                                        if content_rect.contains(pos) {
+                                                                        // Only highlight when mouse is within the visible clip area
+                                                                        if clip_rect.contains(pos) {
                                                                             let relative_y = pos.y - content_rect.top();
                                                                             let line_idx = (relative_y / editor_line_height).floor() as usize;
                                                                             if line_idx < line_count {
-                                                                                let highlight_color = Color32::from_rgba_unmultiplied(128, 128, 128, 50);
                                                                                 let line_top = content_rect.top() + (line_idx as f32 * editor_line_height);
-                                                                                let line_rect = Rect::from_min_size(
-                                                                                    egui::pos2(content_rect.left(), line_top),
-                                                                                    vec2(content_rect.width(), editor_line_height),
-                                                                                );
-                                                                                ui.painter().rect_filled(line_rect, 0.0, highlight_color);
+                                                                                let line_bottom = line_top + editor_line_height;
+                                                                                
+                                                                                // Only highlight if line is completely visible (not truncated at bottom)
+                                                                                if line_bottom <= complete_lines_bottom && line_top >= clip_rect.top() {
+                                                                                    // Use a more visible highlight color (cornflower blue tint)
+                                                                                    let highlight_color = Color32::from_rgba_unmultiplied(100, 149, 237, 80);
+                                                                                    let line_rect = Rect::from_min_size(
+                                                                                        egui::pos2(content_rect.left(), line_top),
+                                                                                        vec2(content_rect.width(), editor_line_height),
+                                                                                    );
+                                                                                    ui.painter().rect_filled(line_rect, 0.0, highlight_color);
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
+                                                                    } // end layer_is_top
                                                                     
                                                                     let text_edit = egui::TextEdit::multiline(&mut buffer)
                                                                         .id_source("primary_editor")
@@ -6524,8 +6599,77 @@ impl RustNotePadApp {
                                                                         .desired_rows(1) // Let it grow
                                                                         .lock_focus(true)
                                                                         .frame(false); // Modern look: no internal frame
-                                                                    text_edit.show(ui)
+                                                                    let edit_output = text_edit.show(ui);
+                                                                    
+                                                                    edit_output
                                                                 });
+                                                            
+                                                            // Align scroll offset to line height to prevent half-line display
+                                                            let current_offset_y = scroll_output.state.offset.y;
+                                                            let aligned_offset_y = (current_offset_y / editor_line_height).round() * editor_line_height;
+                                                            if (current_offset_y - aligned_offset_y).abs() > 0.5 {
+                                                                let mut new_state = scroll_output.state.clone();
+                                                                new_state.offset.y = aligned_offset_y;
+                                                                new_state.store(ui.ctx(), scroll_output.id);
+                                                            }
+                                                            
+                                                            // Now draw line numbers based on editor scroll offset
+                                                            let scroll_offset = aligned_offset_y;
+                                                            let first_visible_line = (scroll_offset / gutter_line_height).floor() as usize;
+                                                            let visible_lines_count = (full_height / gutter_line_height).ceil() as usize + 1;
+                                                            
+                                                            // Get hover position for gutter highlighting
+                                                            let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                                                            let current_layer = ui.layer_id();
+                                                            
+                                                            for i in 0..visible_lines_count {
+                                                                let line_num = first_visible_line + i + 1;
+                                                                if line_num > gutter_line_count {
+                                                                    break;
+                                                                }
+                                                                
+                                                                // Calculate position in gutter
+                                                                let y_offset = i as f32 * gutter_line_height;
+                                                                let line_top = gutter_rect.top() + y_offset;
+                                                                let line_bottom = line_top + gutter_line_height;
+                                                                
+                                                                // Skip if outside visible area
+                                                                if line_bottom < gutter_rect.top() || line_top > gutter_rect.bottom() {
+                                                                    continue;
+                                                                }
+                                                                
+                                                                let line_rect = Rect::from_min_size(
+                                                                    egui::pos2(gutter_rect.left() + 4.0, line_top),
+                                                                    vec2(line_number_width - 8.0, gutter_line_height),
+                                                                );
+                                                                
+                                                                // Check hover
+                                                                let is_hovered = hover_pos.map_or(false, |pos| {
+                                                                    let top_layer = ui.ctx().layer_id_at(pos);
+                                                                    let layer_is_top = top_layer.map_or(true, |l| l == current_layer);
+                                                                    layer_is_top && gutter_rect.contains(pos) && pos.y >= line_top && pos.y < line_bottom
+                                                                });
+                                                                
+                                                                if is_hovered {
+                                                                    ui.painter().rect_filled(line_rect, 0.0, gutter_highlight);
+                                                                }
+                                                                
+                                                                let text_color = if is_hovered { gutter_hover_text } else { gutter_text };
+                                                                // Simple right-aligned line number rendering
+                                                                let line_num_str = format!("{}", line_num);
+                                                                
+                                                                // Position: right edge of gutter with padding, vertically centered in line
+                                                                let text_x = gutter_rect.right() - 8.0;
+                                                                let text_y = line_top + gutter_line_height * 0.5;
+                                                                
+                                                                ui.painter().text(
+                                                                    egui::pos2(text_x, text_y),
+                                                                    egui::Align2::RIGHT_CENTER,
+                                                                    line_num_str,
+                                                                    egui::FontId::proportional(gutter_font_size),
+                                                                    text_color,
+                                                                );
+                                                            }
                                                             
                                                             let output = scroll_output.inner;
 
@@ -8662,6 +8806,92 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     None
 }
 
+/// Load a system font by family name
+/// Uses direct file paths for common fonts to avoid slow font-kit queries
+/// TODO: Enable when font loading is properly implemented
+#[allow(dead_code)]
+fn load_system_font(font_family: &str) -> Option<Vec<u8>> {
+    // Get user font directory
+    let home = env::var("HOME").unwrap_or_default();
+    let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+    
+    // Map font family names to common file paths
+    let font_paths: Vec<PathBuf> = match font_family {
+        "Fira Code" => vec![
+            user_fonts.join("FiraCode-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/opentype/firacode/FiraCode-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/TTF/FiraCode-Regular.ttf"),
+        ],
+        "JetBrains Mono" => vec![
+            user_fonts.join("JetBrainsMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/opentype/jetbrains-mono/JetBrainsMono-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"),
+        ],
+        "DejaVu Sans Mono" => vec![
+            user_fonts.join("DejaVuSansMono.ttf"),
+            PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+            PathBuf::from("/usr/share/fonts/TTF/DejaVuSansMono.ttf"),
+        ],
+        "Liberation Mono" => vec![
+            user_fonts.join("LiberationMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/TTF/LiberationMono-Regular.ttf"),
+        ],
+        "Ubuntu Mono" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"),
+            PathBuf::from("/usr/share/fonts/TTF/UbuntuMono-R.ttf"),
+        ],
+        "Noto Sans Mono" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansMono-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/TTF/NotoSansMono-Regular.ttf"),
+        ],
+        "Source Code Pro" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/source-code-pro/SourceCodePro-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/opentype/source-code-pro/SourceCodePro-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/adobe-source-code-pro/SourceCodePro-Regular.otf"),
+        ],
+        "Hack" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/hack/Hack-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/TTF/Hack-Regular.ttf"),
+        ],
+        "Inconsolata" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/inconsolata/Inconsolata-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/opentype/inconsolata/Inconsolata-Regular.otf"),
+            PathBuf::from("/usr/share/fonts/TTF/Inconsolata-Regular.ttf"),
+        ],
+        "Roboto Mono" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/roboto/RobotoMono-Regular.ttf"),
+            PathBuf::from("/usr/share/fonts/TTF/RobotoMono-Regular.ttf"),
+        ],
+        "Sarasa Mono TC" | "Sarasa Term TC" => vec![
+            PathBuf::from("/usr/share/fonts/truetype/sarasa/sarasa-mono-tc-regular.ttf"),
+            PathBuf::from("/usr/share/fonts/sarasa-gothic/sarasa-mono-tc-regular.ttf"),
+        ],
+        _ => vec![],
+    };
+    
+    // Try to load from known paths
+    for path in &font_paths {
+        if path.exists() {
+            match fs::read(path) {
+                Ok(data) => {
+                    log_info(format!("Loaded font from {}", path.display()));
+                    return Some(data);
+                }
+                Err(err) => {
+                    log_warn(format!("Failed to read font {}: {}", path.display(), err));
+                }
+            }
+        }
+    }
+    
+    log_warn(format!("Font '{}' not found in known paths", font_family));
+    None
+}
+
 fn load_font_asset(filename: &str) -> Option<Vec<u8>> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -8685,20 +8915,17 @@ fn load_font_asset(filename: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Retrieves a list of available monospace fonts.
-/// Returns a curated list of common monospace font family names that the user can choose from.
-/// Font family changes require a restart to take effect.
+/// Retrieves a list of common monospace fonts.
+/// Returns a curated list of popular monospace font family names.
+/// The actual availability is checked when loading the font.
 fn get_available_monospace_fonts() -> Vec<String> {
-    let mut fonts = vec![
-        // Default system monospace
-        "monospace".to_string(),
-        // Popular programming fonts
+    vec![
+        "System Default".to_string(),
         "Cascadia Code".to_string(),
         "Cascadia Mono".to_string(),
         "Consolas".to_string(),
         "Courier New".to_string(),
         "DejaVu Sans Mono".to_string(),
-        "Droid Sans Mono".to_string(),
         "Fira Code".to_string(),
         "Fira Mono".to_string(),
         "Hack".to_string(),
@@ -8708,23 +8935,13 @@ fn get_available_monospace_fonts() -> Vec<String> {
         "Liberation Mono".to_string(),
         "Menlo".to_string(),
         "Monaco".to_string(),
-        "Noto Mono".to_string(),
         "Noto Sans Mono".to_string(),
         "Roboto Mono".to_string(),
-        "SF Mono".to_string(),
         "Source Code Pro".to_string(),
         "Ubuntu Mono".to_string(),
-        // CJK monospace fonts
-        "Microsoft YaHei Mono".to_string(),
-        "Noto Sans Mono CJK TC".to_string(),
-        "PingFang SC".to_string(),
         "Sarasa Mono TC".to_string(),
         "Sarasa Term TC".to_string(),
-    ];
-    
-    fonts.sort();
-    fonts.dedup();
-    fonts
+    ]
 }
 
 fn main() -> eframe::Result<()> {

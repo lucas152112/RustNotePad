@@ -1,5 +1,18 @@
 # Develop Diary / 開發日誌
 
+## 2025-12-12
+
+### 完成 / Completed
+- 修正編輯器行號顯示：確保行號數字使用固定寬度，解決數字 1 顯示較窄的問題。 / Fixed editor line number display: ensured line number digits use fixed width, resolving the issue where digit 1 appeared narrower than others.
+- 修正行數計算：統一編輯器與狀態列的行數計算邏輯，正確處理檔案末尾換行符，確保顯示行數一致。 / Fixed line count calculation: unified line counting logic between editor and status bar, correctly handling trailing newlines to ensure consistent line count display.
+- 改善文字垂直對齊：為編輯器 layouter 加入 `valign: egui::Align::Center`，讓中英文字在行高內垂直置中顯示。 / Improved text vertical alignment: added `valign: egui::Align::Center` to editor layouter, centering both CJK and English text within line height.
+- 增加字元間距：設定 `extra_letter_spacing: 1.5` 解決英文字母粘連問題，提升可讀性。 / Added character spacing: set `extra_letter_spacing: 1.5` to resolve English character crowding, improving readability.
+- 調整行高比例：將行高從 `font_size + 4.0` 改為 `font_size * 1.35`，平衡中英文混合顯示的間距需求。 / Adjusted line height ratio: changed from `font_size + 4.0` to `font_size * 1.35`, balancing spacing needs for mixed CJK/English text display.
+- 準備系統字體載入功能：建立 `load_system_font()` 函數支援從系統路徑載入常用等寬字體（Fira Code、JetBrains Mono、DejaVu Sans Mono 等），待效能優化後啟用。 / Prepared system font loading: created `load_system_font()` function to load common monospace fonts from system paths (Fira Code, JetBrains Mono, DejaVu Sans Mono, etc.), pending performance optimization before enabling.
+
+### 未完成 / Pending
+- 自訂字體功能暫時停用：因 egui 字體載入效能問題導致程式啟動卡住，需進一步研究背景載入或延遲載入方案。 / Custom font feature temporarily disabled: egui font loading performance issues cause startup hang, requires further research on background or lazy loading solutions.
+
 ## 2025-12-08
 
 ### 完成 / Completed

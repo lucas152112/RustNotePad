@@ -1,0 +1,19 @@
+diff --git a/rustnotepad_gui/src/main.rs b/rustnotepad_gui/src/main.rs
+index e473757..6e9a452 100644
+--- a/rustnotepad_gui/src/main.rs
++++ b/rustnotepad_gui/src/main.rs
+@@ -6363,13 +6363,13 @@ impl App for RustNotePadApp {
+ 
+         self.show_menu_bar(ctx);
+         self.show_toolbar(ctx);
+-        self.show_status_bar(ctx);
+         self.show_bottom_dock(ctx);
+         self.show_left_sidebar(ctx);
+         if self.document_map_visible {
+             self.show_right_sidebar(ctx);
+         }
+         self.show_editor_area(ctx);
++        self.show_status_bar(ctx);
+         self.render_settings_window(ctx);
+         self.render_file_dialogs(ctx);
+         self.show_print_preview_window(ctx);
