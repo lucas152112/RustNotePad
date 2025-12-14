@@ -1,5 +1,20 @@
 # Develop Diary / 開發日誌
 
+## 2025-12-14
+
+### 完成 / Completed
+- 修正行號滑鼠懸停高亮同步：擴展滑鼠懸停高亮區域至完整編輯器範圍（包含行號區），確保滑鼠移動時行號與內容區高亮同步顯示。 / Fixed line number hover highlight sync: extended mouse hover highlight area to full editor range (including line number gutter), ensuring line numbers and content area highlight synchronously when mouse moves.
+- 實作面板可見性持久化：新增 `persist_panel_visibility()` 輔助函數，將 Document Map、Project Panel 等面板的顯示狀態儲存至 `profile.properties`，重啟後自動還原。 / Implemented panel visibility persistence: added `persist_panel_visibility()` helper to save Document Map, Project Panel visibility states to `profile.properties`, automatically restored on restart.
+- 移除不必要的分隔線：移除 Document Map 與檔案清單中的分隔線，簡化視覺設計。 / Removed unnecessary separator lines: removed separator lines from Document Map and file list for cleaner visual design.
+- 實作非同步目錄載入：使用 `std::sync::mpsc` 與 `std::thread` 實作背景目錄掃描，新增 `build_filesystem_project_tree_async()` 函數，載入中顯示旋轉動畫，避免大型目錄（如 `target/`、`node_modules/`）導致程式凍結。 / Implemented async directory loading: used `std::sync::mpsc` and `std::thread` for background directory scanning, added `build_filesystem_project_tree_async()` function with loading spinner, preventing UI freeze on large directories (e.g., `target/`, `node_modules/`).
+- 新增目錄過濾機制：加入 `SKIP_DIRS` 常數過濾 `target`、`node_modules`、`.git`、`__pycache__` 等大型或無用目錄，提升專案樹載入效能。 / Added directory filtering: introduced `SKIP_DIRS` constant to filter `target`, `node_modules`, `.git`, `__pycache__` and other large/unnecessary directories, improving project tree loading performance.
+- 修正多檔案工作階段持久化：修正 `persist_session()` 邏輯，正確遍歷所有分頁並儲存路徑，確保重啟後還原所有開啟的檔案而非僅最後一個。 / Fixed multi-file session persistence: corrected `persist_session()` logic to iterate all tabs and save paths, ensuring all open files are restored on restart instead of only the last one.
+- 重新設計分頁列外觀：使用 `egui::Frame` 為每個分頁添加可見邊框與圓角，實作獨立的「×」關閉按鈕於每個分頁，採用明確的現行/非現行分頁樣式區分，支援色彩標籤顯示。 / Redesigned tab strip appearance: used `egui::Frame` to add visible borders and rounding to each tab, implemented individual "×" close button per tab, applied distinct active/inactive tab styling, and supported color badge display.
+
+### 未完成 / Pending
+- 分頁右鍵選單功能（關閉其他、關閉右側等）。 / Tab context menu features (close others, close to the right, etc.).
+- 分頁拖曳重新排序功能。 / Tab drag-and-drop reordering.
+
 ## 2025-12-12
 
 ### 完成 / Completed

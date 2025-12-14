@@ -58,7 +58,8 @@ use std::io::{self, Write as IoWrite};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Arc, Once};
+use std::sync::{mpsc, Arc, Once};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustnotepad_printing::job::{
@@ -1460,6 +1461,20 @@ fn build_filesystem_project_tree(
     populate_project_folder(tree, root_id, root_path, 0, max_depth, max_entries)
 }
 
+/// Spawn a background thread to build the project tree and return a receiver for the result
+fn build_filesystem_project_tree_async(
+    root_path: PathBuf,
+    max_depth: usize,
+    max_entries: usize,
+) -> mpsc::Receiver<ProjectTree> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let tree = build_filesystem_project_tree(&root_path, max_depth, max_entries);
+        let _ = tx.send(tree);
+    });
+    rx
+}
+
 fn populate_project_folder(
     mut tree: ProjectTree,
     parent_id: ProjectNodeId,
@@ -1507,6 +1522,17 @@ fn populate_project_folder(
         if name.is_empty() || name == ".rustnotepad" {
             continue;
         }
+        
+        // Skip large directories that would cause performance issues
+        const SKIP_DIRS: &[&str] = &[
+            "target", "node_modules", ".git", ".hg", ".svn", 
+            "build", "dist", "out", ".cache", "__pycache__",
+            "vendor", ".cargo", ".rustup", "venv", ".venv",
+        ];
+        if SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        
         let Ok(file_type) = entry.file_type() else {
             log_warn(format!(
                 "Failed to resolve file type for {}",
@@ -1767,6 +1793,8 @@ struct RustNotePadApp {
     function_registry: ParserRegistry,
     project_tree: ProjectTree,
     project_tree_store: ProjectTreeStore,
+    project_tree_loading: bool,
+    project_tree_receiver: Option<mpsc::Receiver<ProjectTree>>,
     session_store: SessionStore,
     workspace_root: PathBuf,
     document_index: Arc<DocumentIndex>,
@@ -2129,6 +2157,24 @@ impl RustNotePadApp {
 
         let preferences = PreferencesState::from(&current_preferences);
 
+        // Load panel visibility states from profile
+        let project_panel_visible = profile_store
+            .get("view.project_panel_visible")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
+        let function_list_visible = profile_store
+            .get("view.function_list_visible")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
+        let document_map_visible = profile_store
+            .get("view.document_map_visible")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true);
+        let bottom_panels_visible = profile_store
+            .get("view.bottom_panels_visible")
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
         let default_macro_name = "Macro 1".to_string();
         let mut plugin_system = PluginSystem::new(&workspace_root);
         plugin_system.restore_from_profile(&profile_store);
@@ -2175,6 +2221,8 @@ impl RustNotePadApp {
             function_registry,
             project_tree,
             project_tree_store,
+            project_tree_loading: false,
+            project_tree_receiver: None,
             session_store,
             workspace_root,
             document_index,
@@ -2228,10 +2276,10 @@ impl RustNotePadApp {
             plugin_win_install_overwrite: false,
             plugin_pending_removal: None,
             view_fullscreen: false,
-            project_panel_visible: true,
-            function_list_visible: true,
-            document_map_visible: true,
-            bottom_panels_visible: false,
+            project_panel_visible,
+            function_list_visible,
+            document_map_visible,
+            bottom_panels_visible,
             notification_log: VecDeque::new(),
             show_help_manual_window: false,
             show_help_debug_window: false,
@@ -3609,6 +3657,7 @@ impl RustNotePadApp {
             }
             "menu.view.document_map" => {
                 self.document_map_visible = !self.document_map_visible;
+                self.persist_panel_visibility("view.document_map_visible", self.document_map_visible);
                 if self.document_map_visible {
                     self.push_localized_notification(
                         "Document Map panel shown.",
@@ -3623,6 +3672,7 @@ impl RustNotePadApp {
             }
             "menu.view.function_list" => {
                 self.function_list_visible = !self.function_list_visible;
+                self.persist_panel_visibility("view.function_list_visible", self.function_list_visible);
                 if self.function_list_visible {
                     self.push_localized_notification(
                         "Function List panel enabled.",
@@ -3637,6 +3687,7 @@ impl RustNotePadApp {
             }
             "menu.view.project_panel" => {
                 self.project_panel_visible = !self.project_panel_visible;
+                self.persist_panel_visibility("view.project_panel_visible", self.project_panel_visible);
                 if self.project_panel_visible {
                     self.push_localized_notification("Project panel visible.", "專案面板已顯示。");
                 } else {
@@ -3646,6 +3697,7 @@ impl RustNotePadApp {
             "menu.view.bottom_panels" => {
                 let desired = !self.bottom_panels_visible;
                 self.set_bottom_panels_visible(desired);
+                self.persist_panel_visibility("view.bottom_panels_visible", self.bottom_panels_visible);
                 if self.bottom_panels_visible {
                     self.push_localized_notification(
                         "Bottom panels shown.",
@@ -4715,6 +4767,12 @@ impl RustNotePadApp {
         }
     }
 
+    fn persist_panel_visibility(&mut self, key: &str, visible: bool) {
+        if let Err(err) = self.profile_store.set(key, visible.to_string()) {
+            log_warn(format!("Failed to persist panel visibility {key}: {err}"));
+        }
+    }
+
     fn resolve_workspace_path(&self, input: &str) -> Result<PathBuf, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -5054,12 +5112,19 @@ impl RustNotePadApp {
         if let Some(pane) = self.layout.panes.iter().find(|p| p.role == PaneRole::Primary) {
             for (idx, tab_view) in pane.tabs.iter().enumerate() {
                 let mut session_tab = SessionTab::default();
-                if let Some(path) = &self.current_document_path {
-                    if tab_view.id == self.current_document_id {
-                         session_tab.path = Some(path.clone());
+                
+                // For active tab, use current_document_path if available
+                if tab_view.id == self.current_document_id {
+                    if let Some(path) = &self.current_document_path {
+                        session_tab.path = Some(path.clone());
+                    } else if Path::new(&tab_view.id).exists() {
+                        session_tab.path = Some(Path::new(&tab_view.id).to_path_buf());
                     }
-                } else if Path::new(&tab_view.id).exists() {
-                     session_tab.path = Some(Path::new(&tab_view.id).to_path_buf());
+                } else {
+                    // For non-active tabs, try to use tab_view.id as path
+                    if Path::new(&tab_view.id).exists() {
+                        session_tab.path = Some(Path::new(&tab_view.id).to_path_buf());
+                    }
                 }
                 
                 session_tab.display_name = Some(tab_view.title.clone());
@@ -5798,28 +5863,33 @@ impl RustNotePadApp {
         egui::ScrollArea::vertical()
             .max_height(height)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            if self
-                                .icon_button(
-                                    ui,
-                                    ICON_XMARK,
-                                    &self.localized("Hide project panel", "關閉專案面板"),
-                                )
-                                .clicked()
-                            {
-                                self.project_panel_visible = false;
-                            }
-                        },
-                    );
+                // Close button row - compact style
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if self
+                        .icon_button(
+                            ui,
+                            ICON_XMARK,
+                            &self.localized("Hide project panel", "關閉專案面板"),
+                        )
+                        .clicked()
+                    {
+                        self.project_panel_visible = false;
+                        self.persist_panel_visibility("view.project_panel_visible", false);
+                    }
                 });
-
+                
+                // Show loading indicator if directory is being loaded
+                if self.project_tree_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(self.localized("Loading...", "載入中..."));
+                    });
+                }
+                
                 // Navigation entry: "." - navigate to filesystem root
+                let nav_enabled = !self.project_tree_loading;
                 if ui
-                    .selectable_label(false, ".")
+                    .add_enabled(nav_enabled, egui::SelectableLabel::new(false, "."))
                     .on_hover_text(self.localized(
                         "Navigate to filesystem root",
                         "切換到檔案系統根目錄",
@@ -5831,21 +5901,19 @@ impl RustNotePadApp {
                     } else {
                         PathBuf::from("/")
                     };
-                    let tree = build_filesystem_project_tree(&root_path, 4, 200);
-                    if let Err(err) = self.project_tree_store.save(&tree) {
-                        log_warn(format!("Failed to persist project tree: {err}"));
-                    }
-                    self.project_tree = tree;
+                    // Start async loading
+                    self.project_tree_receiver = Some(build_filesystem_project_tree_async(root_path.clone(), 4, 200));
+                    self.project_tree_loading = true;
                     self.workspace_root = root_path;
                     log_info(self.localized_owned(
-                        "Navigated to filesystem root".to_string(),
-                        "已切換到檔案系統根目錄".to_string(),
+                        "Loading filesystem root...".to_string(),
+                        "正在載入檔案系統根目錄...".to_string(),
                     ));
                 }
 
                 // Navigation entry: ".." - navigate to parent directory
                 if ui
-                    .selectable_label(false, "..")
+                    .add_enabled(nav_enabled, egui::SelectableLabel::new(false, ".."))
                     .on_hover_text(self.localized(
                         "Navigate to parent directory",
                         "返回上層目錄",
@@ -5853,15 +5921,13 @@ impl RustNotePadApp {
                     .clicked()
                 {
                     if let Some(parent_path) = self.workspace_root.parent().map(|p| p.to_path_buf()) {
-                        let tree = build_filesystem_project_tree(&parent_path, 4, 200);
-                        if let Err(err) = self.project_tree_store.save(&tree) {
-                            log_warn(format!("Failed to persist project tree: {err}"));
-                        }
-                        self.project_tree = tree;
+                        // Start async loading
+                        self.project_tree_receiver = Some(build_filesystem_project_tree_async(parent_path.clone(), 4, 200));
+                        self.project_tree_loading = true;
                         self.workspace_root = parent_path;
                         log_info(self.localized_owned(
-                            "Navigated to parent directory".to_string(),
-                            "已返回上層目錄".to_string(),
+                            "Loading parent directory...".to_string(),
+                            "正在載入上層目錄...".to_string(),
                         ));
                     } else {
                         log_info(self.localized_owned(
@@ -5938,9 +6004,9 @@ impl RustNotePadApp {
                 .clicked()
             {
                 self.document_map_visible = false;
+                self.persist_panel_visibility("view.document_map_visible", false);
             }
         });
-        ui.separator();
         let scroll_height = ui.available_height().max(0.0);
         egui::ScrollArea::vertical()
             .max_height(scroll_height)
@@ -6400,7 +6466,6 @@ impl RustNotePadApp {
                         Layout::top_down(Align::Min),
                         |ui| {
                             self.render_tab_strip(ui, pane.clone());
-                            ui.separator();
                             let editor_size = ui.available_size();
                             ui.allocate_ui_with_layout(
                                 editor_size,
@@ -6460,6 +6525,9 @@ impl RustNotePadApp {
                                                         vec2(editor_area_rect.width(), full_height),
                                                     );
                                                     ui.set_clip_rect(clipped_rect);
+                                                    
+                                                    // Store the full editor area rect for gutter hover sync
+                                                    let full_editor_area_rect = clipped_rect;
                                                     
                                                     // Store editor_line_height and line_count for gutter to use
                                                     // These will be used after editor renders to sync line numbers
@@ -6643,11 +6711,13 @@ impl RustNotePadApp {
                                                                     vec2(line_number_width - 8.0, gutter_line_height),
                                                                 );
                                                                 
-                                                                // Check hover
+                                                                // Check hover - sync with both gutter and editor area
+                                                                // Highlight line number when mouse is anywhere on that row (gutter or editor)
                                                                 let is_hovered = hover_pos.map_or(false, |pos| {
                                                                     let top_layer = ui.ctx().layer_id_at(pos);
                                                                     let layer_is_top = top_layer.map_or(true, |l| l == current_layer);
-                                                                    layer_is_top && gutter_rect.contains(pos) && pos.y >= line_top && pos.y < line_bottom
+                                                                    // Check if mouse is within the full editor area (gutter + text) on this line
+                                                                    layer_is_top && full_editor_area_rect.contains(pos) && pos.y >= line_top && pos.y < line_bottom
                                                                 });
                                                                 
                                                                 if is_hovered {
@@ -6716,7 +6786,6 @@ impl RustNotePadApp {
                         Layout::top_down(Align::Min),
                         |ui| {
                             self.render_tab_strip(ui, pane.clone());
-                            ui.separator();
                             let secondary_height = ui.available_height().max(0.0);
                             egui::ScrollArea::vertical()
                                 .max_height(secondary_height)
@@ -7119,108 +7188,111 @@ impl RustNotePadApp {
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
-        let total_width = ui.available_width();
-        let height = self.theme_manager.active_theme().fonts.ui_size as f32 + 8.0;
-        let (rect, _response) = ui.allocate_exact_size(vec2(total_width, height), egui::Sense::hover());
-
-        ui.allocate_ui_at_rect(rect, |ui| {
-            let close_button_width = 28.0;
-            let tabs_width = (total_width - close_button_width - 6.0).max(0.0);
-            
-            // Render tabs on the left
-            let tabs_rect = Rect::from_min_size(rect.min, vec2(tabs_width, height));
-            ui.allocate_ui_at_rect(tabs_rect, |ui| {
-                egui::ScrollArea::horizontal().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            egui::ScrollArea::horizontal()
+                .id_source("tab_scroll")
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let active_id = pane.active.as_deref();
+                        let role = pane.role;
                         for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
-                            self.render_tab_button(ui, pane.role, active_id, tab);
+                            self.render_tab_button(ui, role, active_id, tab);
                         }
                         for tab in pane.tabs.iter().filter(|tab| !tab.is_pinned) {
-                            self.render_tab_button(ui, pane.role, active_id, tab);
+                            self.render_tab_button(ui, role, active_id, tab);
                         }
                     });
                 });
-            });
-
-            // Render close button on the far right
-            let close_rect = Rect::from_min_size(
-                egui::pos2(rect.max.x - close_button_width, rect.min.y),
-                vec2(close_button_width, height)
-            );
-            ui.allocate_ui_at_rect(close_rect, |ui| {
-                ui.with_layout(Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                    let active_tab = pane
-                        .active
-                        .as_deref()
-                        .and_then(|id| pane.tabs.iter().find(|tab| tab.id == id));
-                    let can_close = active_tab
-                        .map(|tab| !tab.is_pinned && !tab.is_locked)
-                        .unwrap_or(false);
-                    
-                    if let Some(tab) = active_tab {
-                        let tab_id = tab.id.clone();
-                        let close = egui::Button::new(self.icon_text(
-                            ICON_XMARK,
-                            self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0,
-                        ))
-                        .frame(false)
-                        .min_size(vec2(22.0, 20.0));
-                        let close = ui
-                            .add_enabled(can_close, close)
-                            .on_hover_text(self.text("tabs.close_hover").to_string());
-                        if close.clicked() {
-                            self.close_tab(pane.role, &tab_id);
-                        }
-                    }
-                });
-            });
         });
     }
 
     fn render_tab_button(
         &mut self,
         ui: &mut egui::Ui,
-        _role: PaneRole,
+        role: PaneRole,
         active_id: Option<&str>,
         tab: &TabView,
     ) {
         let is_active = active_id
             .map(|active| active == tab.id.as_str())
             .unwrap_or(false);
+        
+        let tab_id = tab.id.clone();
+        let can_close = !tab.is_pinned && !tab.is_locked;
 
-        ui.horizontal(|ui| {
-            if let Some(tag) = tab.color {
-                let color = color32_from_color(parse_tag_color(tag));
-                draw_color_badge(ui, color);
-                ui.add_space(4.0);
-            }
+        // Tab frame styling
+        let bg_color = if is_active {
+            color32_from_color(self.palette.accent)
+        } else {
+            color32_from_color(self.palette.panel)
+        };
+        let stroke_color = if is_active {
+            color32_from_color(self.palette.accent)
+        } else {
+            Color32::from_rgb(100, 100, 100)
+        };
 
-            let mut label = String::new();
-            if tab.is_pinned {
-                label.push_str("[P] ");
-            }
-            label.push_str(&tab.title);
-            if tab.is_locked {
-                label.push_str(" [RO]");
-            }
-            let text = if is_active {
-                RichText::new(label).color(color32_from_color(self.palette.accent_text))
-            } else {
-                RichText::new(label).color(color32_from_color(self.palette.editor_text))
-            };
+        egui::Frame::none()
+            .fill(bg_color)
+            .stroke(egui::Stroke::new(1.0, stroke_color))
+            .rounding(egui::Rounding::same(3.0))
+            .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_height(20.0);
+                    
+                    // Color badge if present
+                    if let Some(tag) = tab.color {
+                        let color = color32_from_color(parse_tag_color(tag));
+                        draw_color_badge(ui, color);
+                        ui.add_space(4.0);
+                    }
 
-            let mut button = egui::Button::new(text).frame(false);
-            if is_active {
-                button = button.fill(color32_from_color(self.palette.accent));
-            }
-            if ui.add(button).clicked() {
-                if self.activate_tab(&tab.id) {
-                    self.status.refresh_from_layout(&self.layout);
-                }
-            }
-        });
-        ui.add_space(6.0);
+                    // Build label
+                    let mut label = String::new();
+                    if tab.is_pinned {
+                        label.push_str("📌 ");
+                    }
+                    label.push_str(&tab.title);
+                    if tab.is_locked {
+                        label.push_str(" 🔒");
+                    }
+                    
+                    let text_color = if is_active {
+                        color32_from_color(self.palette.accent_text)
+                    } else {
+                        color32_from_color(self.palette.editor_text)
+                    };
+                    
+                    // Clickable label for tab activation
+                    let label_response = ui.add(
+                        egui::Label::new(RichText::new(&label).color(text_color))
+                            .sense(egui::Sense::click())
+                    );
+                    if label_response.clicked() {
+                        if self.activate_tab(&tab_id) {
+                            self.status.refresh_from_layout(&self.layout);
+                        }
+                    }
+                    
+                    // Close button for each tab
+                    if can_close {
+                        ui.add_space(4.0);
+                        let close_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new("×").size(14.0).color(text_color)
+                            )
+                            .frame(false)
+                            .min_size(vec2(16.0, 16.0))
+                        );
+                        if close_btn.on_hover_text(self.text("tabs.close_hover").to_string()).clicked() {
+                            self.close_tab(role, &tab_id);
+                        }
+                    }
+                });
+            });
+        
+        ui.add_space(2.0);
     }
 
     fn render_project_node(&mut self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
@@ -7311,6 +7383,36 @@ impl App for RustNotePadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.apply_theme_if_needed(ctx);
         self.status.refresh_from_layout(&self.layout);
+        
+        // Check for completed async project tree loading
+        if self.project_tree_loading {
+            if let Some(ref receiver) = self.project_tree_receiver {
+                match receiver.try_recv() {
+                    Ok(tree) => {
+                        if let Err(err) = self.project_tree_store.save(&tree) {
+                            log_warn(format!("Failed to persist project tree: {err}"));
+                        }
+                        self.project_tree = tree;
+                        self.project_tree_loading = false;
+                        self.project_tree_receiver = None;
+                        log_info(self.localized_owned(
+                            "Directory loaded successfully".to_string(),
+                            "目錄載入完成".to_string(),
+                        ));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Still loading, request repaint to check again
+                        ctx.request_repaint();
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Thread finished without sending (error case)
+                        self.project_tree_loading = false;
+                        self.project_tree_receiver = None;
+                        log_warn("Project tree loading thread disconnected unexpectedly");
+                    }
+                }
+            }
+        }
 
         let is_modal_open = self.show_settings_window || self.show_help_about_window;
 
