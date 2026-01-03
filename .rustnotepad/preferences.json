@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "editor": {
+    "autosave_enabled": true,
+    "autosave_interval_minutes": 5,
+    "show_line_numbers": true,
+    "highlight_active_line": true,
+    "editor_font_family": "System Default",
+    "editor_font_size": 12
+  },
+  "ui": {
+    "locale": "en-US",
+    "theme": "Midnight Indigo"
+  }
+}

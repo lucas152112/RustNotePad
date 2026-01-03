@@ -89,6 +89,11 @@ use x11rb::xcb_ffi::XCBConnection;
 const APP_TITLE: &str = "RNotePad++";
 const ICON_FONT_NAME: &str = "Font Awesome";
 const ICON_XMARK: &str = "\u{f410}"; // Window Close Regular
+const ICON_ARROW_UP: &str = "\u{f062}"; // Arrow Up
+const ICON_ARROW_DOWN: &str = "\u{f063}"; // Arrow Down
+const ICON_BARS: &str = "\u{f0c9}"; // Bars (Menu)
+const ICON_CASE_SENSITIVE: &str = "Ab"; // Case sensitive
+const ICON_WORD: &str = "\u{f1c1}"; // Word icon
 const ICON_FOLDER: &str = "\u{f07b}";
 const ICON_FOLDER_TREE: &str = "\u{f07b}"; // Using same folder icon as fallback
 #[allow(dead_code)]
@@ -167,33 +172,11 @@ enum FindDialogTab {
     Find,
     Replace,
     FindInFiles,
-    Mark,
-}
-
-impl FindDialogTab {
-    fn label_key(self) -> &'static str {
-        match self {
-            FindDialogTab::Find => "dialog.find.tab.find",
-            FindDialogTab::Replace => "dialog.find.tab.replace",
-            FindDialogTab::FindInFiles => "dialog.find.tab.find_in_files",
-            FindDialogTab::Mark => "dialog.find.tab.mark",
-        }
-    }
-
-    fn fallback_label(self) -> (&'static str, &'static str) {
-        match self {
-            FindDialogTab::Find => ("Find", "尋找"),
-            FindDialogTab::Replace => ("Replace", "取代"),
-            FindDialogTab::FindInFiles => ("Find in Files", "在檔案中尋找"),
-            FindDialogTab::Mark => ("Mark", "標記"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FindMode {
     Normal,
-    Extended,
     Regex,
 }
 
@@ -1859,7 +1842,6 @@ struct RustNotePadApp {
     find_dialog_visible: bool,
     find_dialog_tab: FindDialogTab,
     find_query: String,
-    find_replace_text: String,
     find_match_case: bool,
     find_whole_word: bool,
     find_wrap_around: bool,
@@ -2165,7 +2147,7 @@ impl RustNotePadApp {
         let function_list_visible = profile_store
             .get("view.function_list_visible")
             .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let document_map_visible = profile_store
             .get("view.document_map_visible")
             .and_then(|v| v.parse::<bool>().ok())
@@ -2287,7 +2269,6 @@ impl RustNotePadApp {
             find_dialog_visible: false,
             find_dialog_tab: FindDialogTab::Find,
             find_query: String::new(),
-            find_replace_text: String::new(),
             find_match_case: false,
             find_whole_word: false,
             find_wrap_around: true,
@@ -3383,31 +3364,44 @@ impl RustNotePadApp {
             }
         };
         let start_byte = self.search_start_byte(direction);
-        let engine = SearchEngine::new(&self.editor_preview);
-        match engine.find(start_byte, &options) {
-            Ok(Some(hit)) => {
-                self.jump_to_search_match(&hit);
-                self.show_find_status_message(
-                    format!("Match at line {} column {}", hit.line, hit.column),
-                    format!("在第 {} 行第 {} 欄找到結果", hit.line, hit.column),
-                    false,
-                );
-                Ok(())
-            }
-            Ok(None) => {
-                self.show_find_status_message(
-                    "Search string not found",
-                    "找不到符合的字串",
-                    true,
-                );
-                Err(())
-            }
-            Err(err) => {
-                let (en, zh) = self.describe_search_error(err);
-                self.show_find_status_message(en, zh, true);
-                Err(())
-            }
-        }
+        let (hit, all_matches) = {
+            let engine = SearchEngine::new(&self.editor_preview);
+            let hit = match engine.find(start_byte, &options) {
+                Ok(Some(hit)) => hit,
+                Ok(None) => {
+                    self.show_find_status_message(
+                        "Search string not found",
+                        "找不到符合的字串",
+                        true,
+                    );
+                    return Err(());
+                }
+                Err(err) => {
+                    let (en, zh) = self.describe_search_error(err);
+                    self.show_find_status_message(en, zh, true);
+                    return Err(());
+                }
+            };
+
+            // 搜尋全部匹配項以更新側邊欄列表
+            let mut all_options = options.clone();
+            all_options.direction = SearchDirection::Forward;
+            let all_matches = engine.find_all(&all_options).unwrap_or_default();
+            (hit, all_matches)
+        };
+
+        self.jump_to_search_match(&hit);
+        self.show_find_status_message(
+            format!("Match at line {} column {}", hit.line, hit.column),
+            format!("在第 {} 行第 {} 欄找到結果", hit.line, hit.column),
+            false,
+        );
+
+        let path = self.current_document_path.clone();
+        let report = SearchReport::new(vec![FileSearchResult::new(path, all_matches)]);
+        self.search_report = Some(report);
+
+        Ok(())
     }
 
     fn build_search_options(
@@ -3420,19 +3414,9 @@ impl RustNotePadApp {
                 "請輸入要搜尋的內容".to_string(),
             ));
         }
-        let mut pattern = self.find_query.clone();
+        let pattern = self.find_query.clone();
         match self.find_mode {
             FindMode::Normal => {}
-            FindMode::Extended => {
-                pattern = self
-                    .translate_extended_pattern(&pattern)
-                    .map_err(|err| {
-                        (
-                            format!("Extended mode error: {err}"),
-                            format!("延伸模式錯誤：{err}"),
-                        )
-                    })?;
-            }
             FindMode::Regex => {}
         }
         let mut options = SearchOptions::new(pattern);
@@ -3447,44 +3431,6 @@ impl RustNotePadApp {
         options.direction = direction;
         options.dot_matches_newline = self.find_regex_dot_matches_newline;
         Ok(options)
-    }
-
-    fn translate_extended_pattern(&self, pattern: &str) -> Result<String, String> {
-        let mut chars = pattern.chars().peekable();
-        let mut result = String::with_capacity(pattern.len());
-        while let Some(ch) = chars.next() {
-            if ch != '\\' {
-                result.push(ch);
-                continue;
-            }
-            let Some(next) = chars.next() else {
-                result.push('\\');
-                break;
-            };
-            match next {
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                '0' => result.push('\0'),
-                '\\' => result.push('\\'),
-                'x' => {
-                    let hi = chars.next();
-                    let lo = chars.next();
-                    let Some(hi) = hi else {
-                        return Err("Incomplete hex escape".to_string());
-                    };
-                    let Some(lo) = lo else {
-                        return Err("Incomplete hex escape".to_string());
-                    };
-                    let value = format!("{hi}{lo}");
-                    let byte = u8::from_str_radix(&value, 16)
-                        .map_err(|_| "Invalid hex escape".to_string())?;
-                    result.push(byte as char);
-                }
-                other => result.push(other),
-            }
-        }
-        Ok(result)
     }
 
     fn describe_search_error(&self, err: SearchError) -> (String, String) {
@@ -3535,32 +3481,6 @@ impl RustNotePadApp {
         self.update_editor_selection(Some(range));
     }
 
-    fn perform_count_matches(&mut self) {
-        let mut options = match self.build_search_options(SearchDirection::Forward) {
-            Ok(opts) => opts,
-            Err((en, zh)) => {
-                self.show_find_status_message(en, zh, true);
-                return;
-            }
-        };
-        options.direction = SearchDirection::Forward;
-        let engine = SearchEngine::new(&self.editor_preview);
-        match engine.find_all(&options) {
-            Ok(matches) => {
-                let total = matches.len();
-                self.show_find_status_message(
-                    format!("Found {total} matches"),
-                    format!("共找到 {total} 筆結果"),
-                    total == 0,
-                );
-            }
-            Err(err) => {
-                let (en, zh) = self.describe_search_error(err);
-                self.show_find_status_message(en, zh, true);
-            }
-        }
-    }
-
     fn perform_find_all_current_document(&mut self) {
         let mut options = match self.build_search_options(SearchDirection::Forward) {
             Ok(opts) => opts,
@@ -3577,6 +3497,10 @@ impl RustNotePadApp {
                 let report = if matches.is_empty() {
                     SearchReport::default()
                 } else {
+                    // 搜尋完成後，自動跳轉並反白第一個結果
+                    if let Some(first) = matches.first() {
+                        self.jump_to_search_match(first);
+                    }
                     SearchReport::new(vec![FileSearchResult::new(path.clone(), matches.clone())])
                 };
                 self.search_report = Some(report);
@@ -3610,17 +3534,7 @@ impl RustNotePadApp {
     }
 
     fn show_find_results_panel(&mut self) {
-        self.bottom_panels_visible = true;
-        if let Some(idx) = self
-            .layout
-            .bottom_dock
-            .visible_panels
-            .iter()
-            .position(|panel| panel == "find_results")
-        {
-            self.bottom_tab_index = idx;
-        }
-        self.layout.bottom_dock.active_panel = Some("find_results".into());
+        // 搜尋結果會自動在獨立的側邊欄面板中顯示
     }
 
     fn clear_search_results(&mut self) {
@@ -5614,6 +5528,33 @@ impl RustNotePadApp {
         }
     }
 
+    fn get_file_icon(&self, filename: &str) -> &'static str {
+        let lower = filename.to_lowercase();
+        if lower.ends_with(".rs") {
+            "🦀"
+        } else if lower.ends_with(".toml") || lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            "⚙"
+        } else if lower.ends_with(".json") {
+            "{ }"
+        } else if lower.ends_with(".md") {
+            "📄"
+        } else if lower.ends_with(".txt") {
+            "📝"
+        } else if lower.ends_with(".py") {
+            "🐍"
+        } else if lower.ends_with(".js") || lower.ends_with(".ts") {
+            "📜"
+        } else if lower.ends_with(".html") || lower.ends_with(".css") {
+            "🎨"
+        } else if lower.ends_with(".c") || lower.ends_with(".cpp") || lower.ends_with(".h") {
+            "⚡"
+        } else if lower.ends_with(".sh") || lower.ends_with(".bash") {
+            "💻"
+        } else {
+            "📄"
+        }
+    }
+
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar")
             .resizable(false)
@@ -5944,13 +5885,6 @@ impl RustNotePadApp {
                 let has_document = !self.editor_preview.trim().is_empty();
                 let mut optional_sections_rendered = false;
                 if has_document {
-                    self.render_sidebar_section(
-                        ui,
-                        &mut optional_sections_rendered,
-                        |this, ui| {
-                            this.render_highlight_summary(ui);
-                        },
-                    );
                     if self.function_list_visible {
                         self.render_sidebar_section(
                             ui,
@@ -6065,6 +5999,19 @@ impl RustNotePadApp {
                     self.layout.bottom_dock.active_panel = Some(panel.to_string());
                 }
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self
+                    .icon_button(
+                        ui,
+                        ICON_XMARK,
+                        &self.localized("Hide bottom panels", "隱藏底部面板"),
+                    )
+                    .clicked()
+                {
+                    self.set_bottom_panels_visible(false);
+                    self.persist_panel_visibility("view.bottom_panels_visible", false);
+                }
+            });
         });
         ui.separator();
 
@@ -6076,7 +6023,8 @@ impl RustNotePadApp {
 
         match active_panel.as_str() {
             "find_results" => {
-                self.render_find_results_panel(ui);
+                // 搜尋結果已移至側邊欄面板，底部面板不再顯示
+                ui.label(self.text("panel.find_results.empty"));
             }
             "console" => {
                 if let Some(error) = &self.run_last_error {
@@ -6241,28 +6189,35 @@ impl RustNotePadApp {
     }
 
     fn render_find_results_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(self.localized("Search Results", "搜尋結果"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self.icon_button(ui, ICON_XMARK, &self.localized("Close", "關閉")).clicked() {
+                    self.find_status = None;
+                    self.search_report = None;
+                }
+            });
+        });
+        ui.separator();
+
+        // 顯示搜尋狀態 (例如：在第 X 行找到結果)
+        if let Some(status) = &self.find_status {
+            let color = if status.is_error {
+                Color32::from_rgb(239, 68, 68)
+            } else {
+                Color32::from_rgb(34, 197, 94)
+            };
+            ui.colored_label(color, &status.text);
+            ui.separator();
+        }
+
         let Some(report) = self.search_report.clone() else {
-            ui.label(self.text("panel.find_results.empty"));
             return;
         };
         if report.total_matches == 0 {
-            ui.label(self.text("panel.find_results.empty"));
             return;
         }
-        let files_with_matches = report
-            .results
-            .iter()
-            .filter(|entry| !entry.matches.is_empty())
-            .count();
-        let summary = self.format_indexed(
-            "panel.find_results.summary",
-            &[
-                report.total_matches.to_string(),
-                files_with_matches.to_string(),
-            ],
-        );
-        ui.label(summary);
-        ui.add_space(6.0);
+
         let results = report.results.clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -6275,32 +6230,32 @@ impl RustNotePadApp {
                         .unwrap_or_else(|| {
                             self.text("panel.find_results.untitled").to_string()
                         });
-                    let heading = self.format_indexed(
-                        "panel.find_results.file_heading",
-                        &[file_label.clone(), entry.matches.len().to_string()],
-                    );
-                    egui::CollapsingHeader::new(heading)
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for hit in &entry.matches {
-                                let snippet = truncate_snippet(&hit.line_text, 96);
-                                let label = self.format_indexed(
-                                    "panel.find_results.entry",
-                                    &[
-                                        hit.line.to_string(),
-                                        hit.column.to_string(),
-                                        snippet.clone(),
-                                    ],
-                                );
-                                if ui
-                                    .selectable_label(false, label)
-                                    .on_hover_text(hit.line_text.clone())
-                                    .clicked()
-                                {
-                                    self.jump_to_search_match(hit);
-                                }
-                            }
-                        });
+                    
+                    // 如果有多個檔案，顯示檔案標題；如果只有一個檔案，直接顯示列表
+                    let show_file_heading = results.len() > 1;
+                    
+                    if show_file_heading {
+                        let file_icon = entry
+                            .path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .map(|n| self.get_file_icon(n))
+                            .unwrap_or("📄");
+                        ui.label(format!("{} {}", file_icon, file_label));
+                    }
+
+                    for hit in &entry.matches {
+                        let snippet = truncate_snippet(&hit.line_text, 60);
+                        let label = format!("{}: {}", hit.line, snippet);
+                        if ui.selectable_label(false, label).clicked() {
+                            self.jump_to_search_match(hit);
+                        }
+                    }
+                    
+                    if show_file_heading {
+                        ui.separator();
+                    }
                 }
             });
     }
@@ -6398,8 +6353,19 @@ impl RustNotePadApp {
     }
 
     fn show_editor_area(&mut self, ctx: &egui::Context) {
-        if self.project_panel_visible {
-            egui::SidePanel::left("project_panel")
+        let has_search_results = self.search_report.as_ref().map(|r| r.total_matches > 0).unwrap_or(false);
+        let has_find_status = self.find_status.is_some();
+        
+        // 如果有搜尋結果或搜尋狀態，顯示搜尋結果面板；否則顯示項目面板
+        if has_search_results || has_find_status {
+            egui::SidePanel::left("left_panel")
+                .resizable(true)
+                .default_width(PROJECT_PANEL_WIDTH)
+                .show(ctx, |ui| {
+                    self.render_find_results_panel(ui);
+                });
+        } else if self.project_panel_visible {
+            egui::SidePanel::left("left_panel")
                 .resizable(true)
                 .default_width(PROJECT_PANEL_WIDTH)
                 .show(ctx, |ui| {
@@ -6805,46 +6771,6 @@ impl RustNotePadApp {
                 }
             },
         );
-    }
-
-    fn render_highlight_summary(&self, ui: &mut egui::Ui) {
-        ui.heading(self.text("highlight.heading").to_string());
-        match self
-            .highlight_registry
-            .highlight(self.current_language_id.as_str(), &self.editor_preview)
-        {
-            Ok(tokens) => {
-                ui.label(self.format_indexed("highlight.tokens", &[tokens.len().to_string()]));
-                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-                for token in &tokens {
-                    *counts.entry(format!("{:?}", token.kind)).or_insert(0) += 1;
-                }
-                for (kind, count) in counts.iter() {
-                    ui.label(format!("{kind}: {count}"));
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new(self.text("highlight.sample").to_string()).italics());
-                for token in tokens.iter().take(6) {
-                    if let Some(snippet) = self.editor_preview.get(token.range.clone()) {
-                        let snippet = snippet.replace('\n', " ");
-                        if snippet.trim().is_empty() {
-                            continue;
-                        }
-                        let preview = truncate_snippet(&snippet, 32);
-                        ui.label(format!("{:?}: {}", token.kind, preview));
-                    }
-                }
-                if tokens.len() > 6 {
-                    ui.label(self.text("highlight.more").to_string());
-                }
-            }
-            Err(err) => {
-                ui.colored_label(
-                    Color32::from_rgb(239, 68, 68),
-                    self.format_indexed("highlight.error", &[err.to_string()]),
-                );
-            }
-        }
     }
 
     fn render_function_list_panel(&mut self, ui: &mut egui::Ui) {
@@ -7296,10 +7222,11 @@ impl RustNotePadApp {
     }
 
     fn render_project_node(&mut self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
-        let indent = "    ".repeat(depth);
+        let indent = "  ".repeat(depth);
         match &node.kind {
             ProjectNodeKind::File { path } => {
-                let label = format!("{indent}{}", node.name);
+                let icon = self.get_file_icon(&node.name);
+                let label = format!("{}{} {}", indent, icon, node.name);
                 let path_display = path.to_string_lossy();
                 if ui
                     .selectable_label(false, label)
@@ -7310,7 +7237,8 @@ impl RustNotePadApp {
                 }
             }
             ProjectNodeKind::Folder { .. } => {
-                let label = format!("{indent}{}", node.name);
+                let icon = "📁";
+                let label = format!("{}{} {}", indent, icon, node.name);
                 egui::CollapsingHeader::new(label)
                     .default_open(depth < 2)
                     .show(ui, |ui| {
@@ -7320,7 +7248,8 @@ impl RustNotePadApp {
                     });
             }
             ProjectNodeKind::Virtual { subtype, .. } => {
-                let label = format!("{indent}{} ({subtype})", node.name);
+                let icon = "⚙";
+                let label = format!("{}{} {} ({})", indent, icon, node.name, subtype);
                 ui.label(RichText::new(label).color(color32_from_color(self.palette.editor_text)));
             }
         }
@@ -7470,162 +7399,25 @@ impl RustNotePadApp {
         if !self.find_dialog_visible {
             return;
         }
-        let mut open = self.find_dialog_visible;
-        egui::Window::new(self.localized_text("dialog.find.title", "Find", "尋找"))
-            .open(&mut open)
-            .collapsible(false)
+        
+        // 在編輯區上方顯示搜尋欄作為工具列
+        egui::TopBottomPanel::top("find_toolbar")
             .resizable(false)
-            .default_width(560.0)
-            .frame(self.window_frame(ctx))
+            .default_height(40.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    for tab in [
-                        FindDialogTab::Find,
-                        FindDialogTab::Replace,
-                        FindDialogTab::FindInFiles,
-                        FindDialogTab::Mark,
-                    ] {
-                        let (fallback_en, fallback_zh) = tab.fallback_label();
-                        let label = self.localized_text(tab.label_key(), fallback_en, fallback_zh);
-                        let selected = self.find_dialog_tab == tab;
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.find_dialog_tab = tab;
-                        }
-                    }
-                });
-                ui.separator();
-                match self.find_dialog_tab {
-                    FindDialogTab::Find => self.render_find_tab(ui),
-                    FindDialogTab::Replace => {
-                        self.render_placeholder_find_tab(ui, FindDialogTab::Replace)
-                    }
-                    FindDialogTab::FindInFiles => {
-                        self.render_placeholder_find_tab(ui, FindDialogTab::FindInFiles)
-                    }
-                    FindDialogTab::Mark => {
-                        self.render_placeholder_find_tab(ui, FindDialogTab::Mark)
-                    }
-                }
-            });
-        self.find_dialog_visible = open;
-    }
-
-    fn render_find_tab(&mut self, ui: &mut egui::Ui) {
-        let label_find_what =
-            self.localized_text("dialog.find.find_what", "Find what:", "尋找內容：");
-        let hint_find = self.localized_text(
-            "dialog.find.find_hint",
-            "Type text to search",
-            "輸入要搜尋的文字",
-        );
-        let label_search_up =
-            self.localized_text("dialog.find.option.up", "Search up", "往上搜尋");
-        let label_whole_word = self.localized_text(
-            "dialog.find.option.whole_word",
-            "Match whole word only",
-            "僅符合整個單字",
-        );
-        let label_match_case = self.localized_text(
-            "dialog.find.option.match_case",
-            "Match case",
-            "區分大小寫",
-        );
-        let label_wrap =
-            self.localized_text("dialog.find.option.wrap", "Wrap around", "循環");
-        let label_search_mode =
-            self.localized_text("dialog.find.search_mode", "Search Mode", "搜尋模式");
-        let label_mode_normal = self.localized_text(
-            "dialog.find.mode.normal",
-            "Normal",
-            "一般",
-        );
-        let label_mode_extended = self.localized_text(
-            "dialog.find.mode.extended",
-            "Extended (\\n, \\r, ...)",
-            "延伸 (\\n, \\r, ...)",
-        );
-        let label_mode_regex = self.localized_text(
-            "dialog.find.mode.regex",
-            "Regular expression",
-            "規則運算式",
-        );
-        let label_regex_dot = self.localized_text(
-            "dialog.find.regex_dot",
-            "`.` matches newline",
-            "`.` 包含換行",
-        );
-        let label_find_next =
-            self.localized_text("dialog.find.button.find_next", "Find Next", "找下一個");
-        let label_count =
-            self.localized_text("dialog.find.button.count", "Count", "數量");
-        let label_find_all_open = self.localized_text(
-            "dialog.find.button.find_all_open",
-            "Find All in Open Documents",
-            "在所有開啟文件中尋找",
-        );
-        let label_find_all_current = self.localized_text(
-            "dialog.find.button.find_all_current",
-            "Find All in Current Document",
-            "在目前文件中全部尋找",
-        );
-        let label_close =
-            self.localized_text("dialog.find.button.close", "Close", "關閉");
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(label_find_what);
-                let text_edit = egui::TextEdit::singleline(&mut self.find_query)
-                    .desired_width(320.0)
-                    .hint_text(hint_find.clone());
-                let response = ui.add(text_edit);
-                if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
-                    let direction = if self.find_direction_up {
-                        SearchDirection::Backward
-                    } else {
-                        SearchDirection::Forward
-                    };
-                    let _ = self.perform_find(direction);
-                }
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.checkbox(&mut self.find_direction_up, label_search_up.clone());
-                    ui.checkbox(&mut self.find_whole_word, label_whole_word.clone());
-                    ui.checkbox(&mut self.find_match_case, label_match_case.clone());
-                    ui.checkbox(&mut self.find_wrap_around, label_wrap.clone());
-                });
-                ui.add_space(16.0);
-                ui.group(|ui| {
-                    ui.label(label_search_mode.clone());
-                    ui.radio_value(&mut self.find_mode, FindMode::Normal, label_mode_normal.clone());
-                    ui.radio_value(
-                        &mut self.find_mode,
-                        FindMode::Extended,
-                        label_mode_extended.clone(),
+                    // 搜尋文字輸入框
+                    let hint_text = self.localized_text(
+                        "dialog.find.find_hint",
+                        "Type text to search",
+                        "輸入要搜尋的文字",
                     );
-                    let regex_selected = self.find_mode == FindMode::Regex;
-                    ui.radio_value(&mut self.find_mode, FindMode::Regex, label_mode_regex.clone());
-                    if !regex_selected {
-                        self.find_regex_dot_matches_newline = false;
-                    }
-                    ui.add_enabled(
-                        regex_selected,
-                        egui::Checkbox::new(
-                            &mut self.find_regex_dot_matches_newline,
-                            label_regex_dot.clone(),
-                        ),
-                    );
-                });
-                ui.add_space(16.0);
-                let button_width = 210.0;
-                ui.vertical(|ui| {
-                    if ui
-                        .add_sized(
-                            egui::vec2(button_width, 0.0),
-                            egui::Button::new(label_find_next.clone()),
-                        )
-                        .clicked()
-                    {
+                    
+                    let text_edit = egui::TextEdit::singleline(&mut self.find_query)
+                        .desired_width(200.0)
+                        .hint_text(hint_text);
+                    let response = ui.add(text_edit);
+                    if response.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter)) {
                         let direction = if self.find_direction_up {
                             SearchDirection::Backward
                         } else {
@@ -7633,94 +7425,87 @@ impl RustNotePadApp {
                         };
                         let _ = self.perform_find(direction);
                     }
-                    if ui
-                        .add_sized(
-                            egui::vec2(button_width, 0.0),
-                            egui::Button::new(label_count.clone()),
-                        )
-                        .clicked()
-                    {
-                        self.perform_count_matches();
+                    
+                    // 大小寫圖示按鈕
+                    let case_tooltip = self.localized_text(
+                        "dialog.find.option.match_case",
+                        "Match case",
+                        "區分大小寫",
+                    );
+                    if self.find_match_case {
+                        if self.icon_button(ui, ICON_CASE_SENSITIVE, &case_tooltip).clicked() {
+                            self.find_match_case = false;
+                        }
+                    } else {
+                        let resp = self.icon_button(ui, ICON_CASE_SENSITIVE, &case_tooltip);
+                        if resp.clicked() {
+                            self.find_match_case = true;
+                        }
                     }
-                    if ui
-                        .add_sized(
-                            egui::vec2(button_width, 0.0),
-                            egui::Button::new(label_find_all_open.clone()),
-                        )
-                        .clicked()
-                    {
-                        self.show_find_status_message(
-                            "Searching across open documents is not available in the preview",
-                            "預覽模式尚未支援在所有開啟檔案中搜尋",
-                            true,
-                        );
+                    
+                    // 全字拼寫圖示按鈕
+                    let word_tooltip = self.localized_text(
+                        "dialog.find.option.whole_word",
+                        "Match whole word only",
+                        "全字拼寫需相符",
+                    );
+                    if self.find_whole_word {
+                        if self.icon_button(ui, ICON_WORD, &word_tooltip).clicked() {
+                            self.find_whole_word = false;
+                        }
+                    } else {
+                        let resp = self.icon_button(ui, ICON_WORD, &word_tooltip);
+                        if resp.clicked() {
+                            self.find_whole_word = true;
+                        }
                     }
-                    if ui
-                        .add_sized(
-                            egui::vec2(button_width, 0.0),
-                            egui::Button::new(label_find_all_current.clone()),
-                        )
-                        .clicked()
-                    {
+                    
+                    // 上一個按鈕（↑）- 在全字拼寫後面
+                    let label_find_prev = self.localized_text(
+                        "dialog.find.button.find_prev",
+                        "Find Previous",
+                        "找上一個",
+                    );
+                    if self.icon_button(ui, ICON_ARROW_UP, &label_find_prev).clicked() {
+                        let _ = self.perform_find(SearchDirection::Backward);
+                    }
+                    
+                    // 下一個按鈕（↓）- 在全字拼寫後面
+                    let label_find_next = self.localized_text(
+                        "dialog.find.button.find_next",
+                        "Find Next",
+                        "找下一個",
+                    );
+                    if self.icon_button(ui, ICON_ARROW_DOWN, &label_find_next).clicked() {
+                        let _ = self.perform_find(SearchDirection::Forward);
+                    }
+                    
+                    // 菜單圖示按鈕（在選取範圍內搜索）
+                    let label_find_all = self.localized_text(
+                        "dialog.find.button.find_all_current",
+                        "Find All in Current Document",
+                        "在選取範圍內搜索",
+                    );
+                    if self.icon_button(ui, ICON_BARS, &label_find_all).clicked() {
                         self.perform_find_all_current_document();
                     }
-                    if ui
-                        .add_sized(
-                            egui::vec2(button_width, 0.0),
-                            egui::Button::new(label_close.clone()),
-                        )
-                        .clicked()
-                    {
-                        self.find_dialog_visible = false;
-                    }
+                    
+                    // 關閉按鈕（右邊）
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.icon_button(
+                            ui,
+                            ICON_XMARK,
+                            &self.localized("Close search", "關閉搜尋"),
+                        ).clicked() {
+                            self.find_dialog_visible = false;
+                        }
+                    });
                 });
             });
-            if let Some(status) = &self.find_status {
-                ui.add_space(8.0);
-                let color = if status.is_error {
-                    Color32::from_rgb(239, 68, 68)
-                } else {
-                    Color32::from_rgb(34, 197, 94)
-                };
-                ui.colored_label(color, &status.text);
-            }
-        });
     }
 
-    fn render_placeholder_find_tab(&mut self, ui: &mut egui::Ui, tab: FindDialogTab) {
-        if matches!(tab, FindDialogTab::Replace) {
-            let label_find_what =
-                self.localized_text("dialog.find.find_what", "Find what:", "尋找內容：");
-            let label_replace_with = self.localized_text(
-                "dialog.find.replace_with",
-                "Replace with:",
-                "取代為：",
-            );
-            ui.label(label_find_what);
-            ui.add(egui::TextEdit::singleline(&mut self.find_query).desired_width(320.0));
-            ui.add_space(6.0);
-            ui.label(label_replace_with);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.find_replace_text).desired_width(320.0),
-            );
-            ui.separator();
-        }
-        let (tab_en, tab_zh) = tab.fallback_label();
-        let tab_name = self.localized_text(tab.label_key(), tab_en, tab_zh);
-        let placeholder_key = "dialog.find.placeholder";
-        let message = if self
-            .localization
-            .locale_has_key(self.locale_code(), placeholder_key)
-        {
-            self.format_indexed(placeholder_key, &[tab_name.clone()])
-        } else {
-            self.localized_owned(
-                format!("{tab_name} is not available in the preview build."),
-                format!("預覽版本尚未提供 {tab_name} 功能。"),
-            )
-        };
-        ui.label(message);
-    }
+
+
 
     fn render_settings_window(&mut self, ctx: &egui::Context) {
         if !self.show_settings_window {

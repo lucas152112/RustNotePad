@@ -1,0 +1,88 @@
+{
+  "format_version": 1,
+  "metadata": {
+    "created_at_unix": 1765544054,
+    "application_version": null,
+    "issues": []
+  },
+  "windows": [
+    {
+      "tabs": [
+        {
+          "display_name": "README.md",
+          "encoding": null,
+          "caret": {
+            "line": 0,
+            "column": 0
+          },
+          "scroll": {
+            "top_line": 0,
+            "horizontal_offset": 0
+          },
+          "folds": [],
+          "dirty_external": false
+        },
+        {
+          "display_name": "update.sample",
+          "encoding": null,
+          "caret": {
+            "line": 0,
+            "column": 0
+          },
+          "scroll": {
+            "top_line": 0,
+            "horizontal_offset": 0
+          },
+          "folds": [],
+          "dirty_external": false
+        },
+        {
+          "display_name": "prepare-commit-msg.sample",
+          "encoding": null,
+          "caret": {
+            "line": 0,
+            "column": 0
+          },
+          "scroll": {
+            "top_line": 0,
+            "horizontal_offset": 0
+          },
+          "folds": [],
+          "dirty_external": false
+        },
+        {
+          "display_name": "pre-rebase.sample",
+          "encoding": null,
+          "caret": {
+            "line": 0,
+            "column": 0
+          },
+          "scroll": {
+            "top_line": 0,
+            "horizontal_offset": 0
+          },
+          "folds": [],
+          "dirty_external": false
+        },
+        {
+          "path": "/home/jackson/rust/RustNotePad/Develop_Diary.md",
+          "display_name": "Develop_Diary.md",
+          "encoding": null,
+          "caret": {
+            "line": 89,
+            "column": 0
+          },
+          "scroll": {
+            "top_line": 0,
+            "horizontal_offset": 0
+          },
+          "folds": [],
+          "unsaved_hash": "e6fdc59aab8d197d",
+          "dirty_external": false
+        }
+      ],
+      "pane_layout": null,
+      "active_tab": 4
+    }
+  ]
+}

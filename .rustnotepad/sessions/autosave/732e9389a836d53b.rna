@@ -44,55 +44,6 @@ This repository currently provides a **UI preview** so we can iterate on layout 
 > **Note / 注意：** All controls are currently mock-ups. They exist to verify layout, naming, and docking structure before real behaviour is implemented.  
 > 現階段所有控制項皆為靜態預覽，用於驗證排版、命名與停駐結構，尚未具備實際功能。
 
-## Project Structure / 專案結構
-
-```
-📦 RustNotePad
- ├─ 📁 .rustnotepad/        Configuration & sessions
- ├─ 📁 apps/                Application binaries
- │  ├─ cli/                 Command-line interface
- │  └─ gui-tauri/           Tauri GUI application
- ├─ 📁 assets/              Static resources
- │  ├─ fonts/               Font files
- │  ├─ icon/                App icons & logos
- │  ├─ langs/               Localization (en-US, zh-TW)
- │  └─ themes/              Theme definitions (JSON)
- ├─ 📁 bin/                 Compiled binaries & resources
- ├─ 📁 changes/             Changelog & migration records
- ├─ 📁 crates/              Core Rust crates
- │  ├─ autocomplete/        Auto-completion engine
- │  ├─ cmdline/             Command-line parser
- │  ├─ core/                Document model & buffer
- │  ├─ function_list/       Function/symbol parser
- │  ├─ highlight/           Syntax highlighting
- │  ├─ lsp_client/          Language server integration
- │  ├─ macros/              Macro recording & execution
- │  ├─ plugin_admin/        Plugin management
- │  ├─ plugin_host/         WASM plugin runtime
- │  ├─ plugin_wasm/         WASM plugin API
- │  ├─ plugin_winabi/       Windows ABI plugin loader
- │  ├─ printing/            Print & preview engine
- │  ├─ project/             Workspace & project mgmt
- │  ├─ runexec/             Script execution
- │  ├─ search/              Find & replace engine
- │  ├─ settings/            Configuration & preferences
- │  └─ telemetry/           Analytics & logging
- ├─ 📁 docker/              Docker sandbox environments
- ├─ 📁 docs/                Feature documentation
- │  ├─ feature_parity/      Notepad++ parity specs
- │  ├─ plugins/             Plugin development guides
- │  └─ screen/              UI mockups & screenshots
- ├─ 📁 e2e/                 End-to-end tests
- ├─ 📁 rustnotepad_gui/     Main GUI application
- ├─ 📁 scripts/             Build & deployment scripts
- ├─ 📁 target/              Build artifacts
- ├─ 📁 tests/               Integration tests
- ├─ 📄 Cargo.toml           Workspace manifest
- ├─ 📄 AGENT.md             Feature roadmap
- ├─ 📄 README.md            This file
- └─ 📄 profile.properties    User preferences
-```
-
 ## Crates / 子套件
 
 - `rustnotepad_core`: foundational document model with encoding/BOM round-trips, disk-change detection, recovery snapshots, file monitoring, and multi-caret primitives.  
