@@ -6626,14 +6626,38 @@ impl RustNotePadApp {
                                                                     }
                                                                     } // end layer_is_top
                                                                     
-                                                                    let text_edit = egui::TextEdit::multiline(&mut buffer)
-                                                                        .id_source("primary_editor")
+                                                                    let editor_id = ui.make_persistent_id("primary_editor");
+                                                                    let pending_selection = self.pending_editor_selection.clone();
+                                                                    
+                                                                    if let Some(pending) = &pending_selection {
+                                                                        let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
+                                                                        state.set_ccursor_range(Some(*pending));
+                                                                        state.store(ui.ctx(), editor_id);
+                                                                        ui.memory_mut(|mem| mem.request_focus(editor_id));
+                                                                    }
+
+                                                                    let edit_output = egui::TextEdit::multiline(&mut buffer)
+                                                                        .id(editor_id)
                                                                         .layouter(&mut layouter)
                                                                         .desired_width(f32::INFINITY)
-                                                                        .desired_rows(1) // Let it grow
+                                                                        .desired_rows(1)
                                                                         .lock_focus(true)
-                                                                        .frame(false); // Modern look: no internal frame
-                                                                    let edit_output = text_edit.show(ui);
+                                                                        .frame(false)
+                                                                        .show(ui);
+                                                                    
+                                                                    if let Some(range) = pending_selection {
+                                                                        edit_output.response.request_focus();
+                                                                        
+                                                                        // 手動捲動至選取範圍 (因 egui 0.25 缺乏 scroll_to_cursor)
+                                                                        let galley = &edit_output.galley;
+                                                                        let cursor1 = galley.from_ccursor(range.primary);
+                                                                        let cursor2 = galley.from_ccursor(range.secondary);
+                                                                        let rect1 = galley.pos_from_cursor(&cursor1);
+                                                                        let rect2 = galley.pos_from_cursor(&cursor2);
+                                                                        let combined_rect = rect1.union(rect2);
+                                                                        let final_rect = combined_rect.translate(edit_output.text_draw_pos.to_vec2());
+                                                                        ui.scroll_to_rect(final_rect, Some(egui::Align::Center));
+                                                                    }
                                                                     
                                                                     edit_output
                                                                 });
@@ -6724,9 +6748,6 @@ impl RustNotePadApp {
                                                             if let Some(pending) =
                                                                 self.pending_editor_selection.take()
                                                             {
-                                                                let mut state = output.state.clone();
-                                                                state.set_ccursor_range(Some(pending));
-                                                                state.store(ui.ctx(), output.response.id);
                                                                 current_selection = Some(pending);
                                                             }
 
@@ -7498,6 +7519,8 @@ impl RustNotePadApp {
                             &self.localized("Close search", "關閉搜尋"),
                         ).clicked() {
                             self.find_dialog_visible = false;
+                            self.search_report = None;
+                            self.find_status = None;
                         }
                     });
                 });
