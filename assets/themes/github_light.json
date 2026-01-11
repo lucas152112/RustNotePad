@@ -1,0 +1,30 @@
+{
+  "name": "GitHub Light",
+  "description": "GitHub's light theme",
+  "kind": "light",
+  "palette": {
+    "background": "#FFFFFF",
+    "panel": "#F6F8FA",
+    "accent": "#0969DA",
+    "accent_text": "#FFFFFF",
+    "editor_background": "#FFFFFF",
+    "editor_text": "#24292F",
+    "status_bar": "#24292F"
+  },
+  "fonts": {
+    "ui_family": "Inter",
+    "ui_size": 14,
+    "editor_family": "JetBrains Mono",
+    "editor_size": 14
+  },
+  "syntax": {
+    "keyword": { "foreground": "#CF222E" },
+    "string": { "foreground": "#0A3069" },
+    "comment": { "foreground": "#6E7781", "italic": true },
+    "number": { "foreground": "#0550AE" },
+    "operator": { "foreground": "#0550AE" },
+    "identifier": { "foreground": "#953800" },
+    "type": { "foreground": "#24292F" },
+    "function": { "foreground": "#8250DF" }
+  }
+}

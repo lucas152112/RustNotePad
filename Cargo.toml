@@ -19,7 +19,7 @@ members = [
     "crates/plugin_host",
     "apps/cli",
     "scripts/dev/l10n-compiler",
-    "rust_sandbox_test",
+    "rust_sandbox_test", "temp_cargo/temp_lib",
 ]
 resolver = "2"
 

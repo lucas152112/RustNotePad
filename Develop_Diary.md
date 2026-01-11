@@ -1,5 +1,16 @@
 # Develop Diary / 開發日誌
 
+## 2026-01-11
+
+### 完成 / Completed
+- 新增「開啟命令提示字元」功能：在工具選單中實作平台特定的終端機啟動功能，支援 Windows (CMD/PowerShell)、macOS (Terminal.app) 與 Linux (x-terminal-emulator/gnome-terminal 等)，並自動導向至目前檔案目錄。 / Added "Open Command Prompt" feature: implemented platform-specific terminal launching in the Tools menu, supporting Windows, macOS, and Linux, with automatic navigation to the current file's directory.
+- 建立使用者操作手冊：新增 `docs/USER_MANUAL.md` 並在說明選單中提供連結，詳細說明各項功能操作。 / Created User Manual: added `docs/USER_MANUAL.md` and linked it in the Help menu, providing detailed instructions for all features.
+- 導入多款 VS Code 風格佈景主題：新增 Dark+、Monokai 與 GitHub Light 等經典主題，透過 JSON 格式動態載入，豐富視覺選擇。 / Introduced VS Code-like themes: added Dark+, Monokai, and GitHub Light themes via JSON configuration, expanding visual options.
+- 優化編輯區分頁列佈局：統一所有分頁高度為 20px，並在分頁列上方增加 4px 間距，提升視覺層次感與操作舒適度。 / Optimized tab strip layout: harmonized all tab heights to 20px and added 4px top padding, improving visual hierarchy and ergonomics.
+- 實作「簡體轉繁體」功能：整合 `zhconv` 函式庫，提供支援詞彙修正的簡繁轉換功能，並完美整合至編輯器的復原/重做系統。 / Implemented "Simplified to Traditional Chinese" conversion: integrated `zhconv` crate for phrase-aware conversion, fully compatible with the editor's undo/redo system.
+- 重新命名「專案面板」為「檔案瀏覽」：統一各語言版本中關於側邊面板的稱呼，使其更符合直覺。 / Renamed "Project Panel" to "File Browser": unified naming of requested side panels across all locales for better intuition.
+- 修正檔案瀏覽面板捲動問題：將 `ScrollArea::vertical()` 改為 `ScrollArea::both()`，修正路徑過長時無法橫向捲動的問題，並優化同步捲動邏輯。 / Fixed File Browser scrolling: migrated to `ScrollArea::both()` to allow horizontal scrolling for long paths and optimized sync-scroll logic.
+
 ## 2025-12-14
 
 ### 完成 / Completed

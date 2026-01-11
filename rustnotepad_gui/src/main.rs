@@ -1387,7 +1387,12 @@ static MENU_STRUCTURE: Lazy<Vec<MenuSection>> = Lazy::new(|| {
         ),
         MenuSection::new(
             "menu.tools",
-            &["menu.tools.md5", "menu.tools.sha256", "menu.tools.open_cmd"],
+            &[
+                "menu.tools.md5",
+                "menu.tools.sha256",
+                "menu.tools.open_cmd",
+                "menu.tools.s2t",
+            ],
         ),
         MenuSection::new(
             "menu.macro",
@@ -1837,6 +1842,7 @@ struct RustNotePadApp {
     bottom_panels_visible: bool,
     notification_log: VecDeque<String>,
     show_help_manual_window: bool,
+    manual_content_cache: Option<String>,
     show_help_debug_window: bool,
     show_help_about_window: bool,
     find_dialog_visible: bool,
@@ -2264,6 +2270,7 @@ impl RustNotePadApp {
             bottom_panels_visible,
             notification_log: VecDeque::new(),
             show_help_manual_window: false,
+            manual_content_cache: None,
             show_help_debug_window: false,
             show_help_about_window: false,
             find_dialog_visible: false,
@@ -2993,15 +3000,25 @@ impl RustNotePadApp {
                 .open(&mut open)
                 .resizable(true)
                 .frame(self.window_frame(ctx))
-                .default_width(360.0)
+                .default_width(600.0)
                 .show(ctx, |ui| {
-                    ui.label(self.localized(
-                        "Refer to docs/AGENT_EN.md and the feature-parity notes for full instructions.\
- Use Preferences → Localization to switch UI languages.",
-                        "請參考 docs/AGENT_EN.md 與功能對照文件取得完整指引；可至「偏好設定 → 語言」切換介面語系。",
-                    ));
+                    if self.manual_content_cache.is_none() {
+                        self.manual_content_cache = Some(std::fs::read_to_string("docs/USER_MANUAL.md")
+                            .unwrap_or_else(|_| "Manual not found (docs/USER_MANUAL.md).".to_string()));
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
+                            if let Some(content) = &self.manual_content_cache {
+                                ui.label(content);
+                            }
+                        });
+                    
                     ui.separator();
-                    ui.monospace("docs/AGENT.md\nREADME.md");
+                    if ui.button(self.localized("Reload", "重新載入")).clicked() {
+                        self.manual_content_cache = None;
+                    }
                 });
             self.show_help_manual_window = open;
         }
@@ -3603,9 +3620,9 @@ impl RustNotePadApp {
                 self.project_panel_visible = !self.project_panel_visible;
                 self.persist_panel_visibility("view.project_panel_visible", self.project_panel_visible);
                 if self.project_panel_visible {
-                    self.push_localized_notification("Project panel visible.", "專案面板已顯示。");
+                    self.push_localized_notification("File browser visible.", "檔案瀏覽已顯示。");
                 } else {
-                    self.push_localized_notification("Project panel hidden.", "專案面板已隱藏。");
+                    self.push_localized_notification("File browser hidden.", "檔案瀏覽已隱藏。");
                 }
             }
             "menu.view.bottom_panels" => {
@@ -3725,16 +3742,73 @@ impl RustNotePadApp {
                 );
             }
             "menu.tools.open_cmd" => {
+                let path = if self.workspace_root.exists() {
+                     self.workspace_root.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("x-terminal-emulator")
+                        .current_dir(&path)
+                        .spawn()
+                        .or_else(|_| {
+                            std::process::Command::new("gnome-terminal")
+                                .current_dir(&path)
+                                .spawn()
+                        })
+                        .or_else(|_| {
+                            std::process::Command::new("konsole")
+                                .current_dir(&path)
+                                .spawn()
+                        })
+                        .or_else(|_| {
+                            std::process::Command::new("xfce4-terminal")
+                                .current_dir(&path)
+                                .spawn()
+                        })
+                        .or_else(|_| {
+                            std::process::Command::new("xterm")
+                                .current_dir(&path)
+                                .spawn()
+                        });
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(&["/c", "start", "cmd"])
+                        .current_dir(&path)
+                        .spawn();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .args(&["-a", "Terminal", path.to_str().unwrap_or(".")])
+                        .spawn();
+                }
+
                 self.push_localized_notification(
                     format!(
-                        "Pretending to launch command prompt in {}",
-                        self.workspace_root.display()
+                        "Launching command prompt in {}",
+                        path.display()
                     ),
                     format!(
-                        "已模擬在 {} 開啟命令提示字元。",
-                        self.workspace_root.display()
+                        "正在於 {} 開啟命令提示字元。",
+                        path.display()
                     ),
                 );
+            }
+            "menu.tools.s2t" => {
+                let converted = zhconv::zhconv(&self.editor_preview, zhconv::Variant::ZhTW);
+                if converted != self.editor_preview {
+                    self.editor_undo_stack.push(self.editor_preview.clone());
+                    self.editor_preview = converted;
+                    self.push_localized_notification(
+                        "Converted Simplified to Traditional Chinese".to_string(),
+                        "已完成簡轉繁轉換".to_string(),
+                    );
+                }
             }
             _ => log_warn(self.localized_owned(
                 format!("Unsupported tools command {item_key}"),
@@ -5769,13 +5843,13 @@ impl RustNotePadApp {
                         self.project_panel_visible = !self.project_panel_visible;
                         if self.project_panel_visible {
                             self.push_localized_notification(
-                                "Project panel visible.",
-                                "專案面板已顯示。",
+                                "File browser visible.",
+                                "檔案瀏覽已顯示。",
                             );
                         } else {
                             self.push_localized_notification(
-                                "Project panel hidden.",
-                                "專案面板已隱藏。",
+                                "File browser hidden.",
+                                "檔案瀏覽已隱藏。",
                             );
                         }
                     }
@@ -5801,7 +5875,7 @@ impl RustNotePadApp {
 
     fn render_project_panel(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.set_min_height(height);
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .max_height(height)
             .show(ui, |ui| {
                 // Close button row - compact style
@@ -5810,7 +5884,7 @@ impl RustNotePadApp {
                         .icon_button(
                             ui,
                             ICON_XMARK,
-                            &self.localized("Hide project panel", "關閉專案面板"),
+                            &self.localized("Hide file browser", "關閉檔案瀏覽"),
                         )
                         .clicked()
                     {
@@ -7135,11 +7209,17 @@ impl RustNotePadApp {
     }
 
     fn render_tab_strip(&mut self, ui: &mut egui::Ui, pane: PaneLayout) {
-        ui.horizontal(|ui| {
+        // Add 4 pixels of space above the tab bar as requested
+        ui.add_space(4.0);
+
+        ui.horizontal_top(|ui| {
+            // Apply a uniform minimum height of 20.0 to the entire tab strip container
+            ui.set_min_height(20.0);
             egui::ScrollArea::horizontal()
                 .id_source("tab_scroll")
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_top(|ui| {
+                        ui.set_min_height(20.0);
                         let active_id = pane.active.as_deref();
                         let role = pane.role;
                         for tab in pane.tabs.iter().filter(|tab| tab.is_pinned) {
@@ -7179,14 +7259,17 @@ impl RustNotePadApp {
             Color32::from_rgb(100, 100, 100)
         };
 
+        // All tabs should have a consistent height of 20.0
+        let frame_height = 20.0;
+
         egui::Frame::none()
             .fill(bg_color)
             .stroke(egui::Stroke::new(1.0, stroke_color))
             .rounding(egui::Rounding::same(3.0))
-            .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+            .inner_margin(egui::Margin::symmetric(6.0, (frame_height - 14.0) / 2.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.set_height(20.0);
+                    ui.set_height(frame_height);
                     
                     // Color badge if present
                     if let Some(tag) = tab.color {

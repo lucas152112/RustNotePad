@@ -1,0 +1,30 @@
+{
+  "name": "Monokai",
+  "description": "The classic Monokai color scheme",
+  "kind": "dark",
+  "palette": {
+    "background": "#272822",
+    "panel": "#3E3D32",
+    "accent": "#F92672",
+    "accent_text": "#F8F8F2",
+    "editor_background": "#272822",
+    "editor_text": "#F8F8F2",
+    "status_bar": "#3E3D32"
+  },
+  "fonts": {
+    "ui_family": "Inter",
+    "ui_size": 14,
+    "editor_family": "JetBrains Mono",
+    "editor_size": 14
+  },
+  "syntax": {
+    "keyword": { "foreground": "#F92672" },
+    "string": { "foreground": "#E6DB74" },
+    "comment": { "foreground": "#75715E", "italic": true },
+    "number": { "foreground": "#AE81FF" },
+    "operator": { "foreground": "#F92672" },
+    "identifier": { "foreground": "#A6E22E" },
+    "type": { "foreground": "#66D9EF", "italic": true },
+    "function": { "foreground": "#A6E22E" }
+  }
+}

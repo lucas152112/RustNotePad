@@ -1,0 +1,30 @@
+{
+  "name": "Dark+ (VS Code)",
+  "description": "Visual Studio Code style dark theme",
+  "kind": "dark",
+  "palette": {
+    "background": "#1E1E1E",
+    "panel": "#252526",
+    "accent": "#007ACC",
+    "accent_text": "#FFFFFF",
+    "editor_background": "#1E1E1E",
+    "editor_text": "#D4D4D4",
+    "status_bar": "#007ACC"
+  },
+  "fonts": {
+    "ui_family": "Segoe UI",
+    "ui_size": 14,
+    "editor_family": "Consolas",
+    "editor_size": 14
+  },
+  "syntax": {
+    "keyword": { "foreground": "#569CD6" },
+    "string": { "foreground": "#CE9178" },
+    "comment": { "foreground": "#6A9955", "italic": true },
+    "number": { "foreground": "#B5CEA8" },
+    "operator": { "foreground": "#D4D4D4" },
+    "identifier": { "foreground": "#9CDCFE" },
+    "type": { "foreground": "#4EC9B0" },
+    "function": { "foreground": "#DCDCAA" }
+  }
+}
