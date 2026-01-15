@@ -4,7 +4,7 @@ use eframe::{egui, App, Frame, NativeOptions};
 use egui::text::CCursor;
 use egui::text_edit::CCursorRange;
 use egui::{
-    style::Margin, vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout,
+    pos2, style::Margin, vec2, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout,
     Rect, RichText, TextStyle,
 };
 use image::load_from_memory;
@@ -107,9 +107,11 @@ const ICON_REDO: &str = "\u{f01e}";
 const ICON_CUT: &str = "\u{f0c4}";
 const ICON_COPY: &str = "\u{f0c5}";
 const ICON_PASTE: &str = "\u{f0ea}";
-const ICON_SEARCH: &str = "\u{f002}";
+const ICON_SEARCH: &str = "\u{1f50d}"; // Magnifying glass
 const ICON_SETTINGS: &str = "\u{f013}";
 const ICON_PLAY: &str = "\u{f04b}";
+const ICON_PUZZLE: &str = "\u{f12e}";
+const ICON_CODE: &str = "\u{f121}";
 const ICON_WINDOW_MINIMIZE: &str = "\u{f2d1}";
 const ICON_WINDOW_MAXIMIZE: &str = "\u{f2d0}";
 const ICON_WINDOW_RESTORE: &str = "\u{f2d2}";
@@ -1749,7 +1751,16 @@ impl StatusBarState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    Explorer,
+    Search,
+    Functions,
+    Plugins,
+}
+
 struct RustNotePadApp {
+    active_activity: Activity,
     profile_store: UserProfileStore,
     preferences_store: PreferencesStore,
     layout: LayoutConfig,
@@ -2178,6 +2189,7 @@ impl RustNotePadApp {
             }
         };
         let mut app = Self {
+            active_activity: Activity::Explorer,
             profile_store,
             preferences_store,
             layout,
@@ -5407,31 +5419,53 @@ impl RustNotePadApp {
         visuals.panel_fill = color32_from_color(self.palette.panel);
         visuals.window_fill = color32_from_color(self.palette.panel);
         visuals.extreme_bg_color = color32_from_color(self.palette.background);
-        let soft_rounding = egui::Rounding::same(2.0);
-        visuals.window_rounding = soft_rounding;
-        visuals.widgets.noninteractive.rounding = soft_rounding;
-        visuals.widgets.inactive.rounding = soft_rounding;
-        visuals.widgets.hovered.rounding = soft_rounding;
-        visuals.widgets.active.rounding = soft_rounding;
+        
+        // Metro Style: Zero rounding
+        let zero_rounding = egui::Rounding::ZERO;
+        visuals.window_rounding = zero_rounding;
+        visuals.widgets.noninteractive.rounding = zero_rounding;
+        visuals.widgets.inactive.rounding = zero_rounding;
+        visuals.widgets.hovered.rounding = zero_rounding;
+        visuals.widgets.active.rounding = zero_rounding;
+        
+        // Metro Style: Button colors
+        let accent_color = color32_from_color(self.palette.accent);
+        let border_color = if definition.kind == ThemeKind::Dark {
+            color32_from_color(self.palette.panel).linear_multiply(1.8)
+        } else {
+            color32_from_color(self.palette.panel).linear_multiply(0.8)
+        };
+
         visuals.widgets.inactive.bg_fill = color32_from_color(self.palette.panel);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border_color);
         visuals.widgets.inactive.fg_stroke.color = color32_from_color(self.palette.editor_text);
-        visuals.widgets.hovered.bg_fill = color32_from_color(self.palette.accent);
-        visuals.widgets.active.bg_fill = color32_from_color(self.palette.accent);
+        
+        visuals.widgets.hovered.bg_fill = accent_color;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent_color);
+        visuals.widgets.hovered.fg_stroke.color = color32_from_color(self.palette.accent_text);
+        
+        visuals.widgets.active.bg_fill = accent_color.linear_multiply(1.2);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent_color.linear_multiply(1.2));
         visuals.widgets.active.fg_stroke.color = color32_from_color(self.palette.accent_text);
-        visuals.selection.bg_fill = Color32::from_rgb(202, 220, 255);
-        visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(153, 187, 238));
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, Color32::from_rgb(200, 200, 200));
+        
+        visuals.selection.bg_fill = accent_color.linear_multiply(0.3);
+        visuals.selection.stroke = egui::Stroke::new(1.0, accent_color);
+        
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border_color);
+        
+        visuals.widgets.hovered.expansion = 0.0;
+        visuals.widgets.active.expansion = 0.0;
+        
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style()).clone();
         style.visuals.override_text_color = Some(color32_from_color(self.palette.editor_text));
         style.visuals.faint_bg_color = color32_from_color(self.palette.background);
         style.visuals.hyperlink_color = color32_from_color(self.palette.accent);
-        style.spacing.item_spacing = vec2(8.0, 6.0);
-        style.spacing.button_padding = vec2(6.0, 4.0);
-        style.spacing.menu_margin = Margin::symmetric(6.0, 4.0);
-        style.spacing.indent = 14.0;
+        style.spacing.item_spacing = vec2(10.0, 8.0);
+        style.spacing.button_padding = vec2(12.0, 6.0);
+        style.spacing.menu_margin = Margin::symmetric(8.0, 6.0);
+        style.spacing.indent = 16.0;
         style.text_styles.insert(
             TextStyle::Body,
             FontId::new(definition.fonts.ui_size as f32, FontFamily::Proportional),
@@ -5457,23 +5491,19 @@ impl RustNotePadApp {
     }
 
     fn window_frame(&self, ctx: &egui::Context) -> egui::Frame {
-        egui::Frame::window(&ctx.style()).stroke(egui::Stroke::new(
-            1.0,
-            Color32::from_rgb(180, 186, 194),
-        ))
+        let border_color = color32_from_color(self.palette.accent);
+        egui::Frame::window(&ctx.style())
+            .stroke(egui::Stroke::new(1.0, border_color))
+            .rounding(egui::Rounding::ZERO)
     }
 
     fn status_bar_frame(&self) -> egui::Frame {
+        let border_color = color32_from_color(self.palette.editor_text).linear_multiply(0.2);
         egui::Frame::none()
             .fill(color32_from_color(self.palette.status_bar))
             .inner_margin(Margin::same(0.0))
-            .rounding(egui::Rounding {
-                nw: 0.0,
-                ne: 0.0,
-                sw: 8.0,
-                se: 8.0,
-            })
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(190, 190, 190)))
+            .rounding(egui::Rounding::ZERO)
+            .stroke(egui::Stroke::new(1.0, border_color))
     }
 
     fn main_panel_frame(&self, ctx: &egui::Context) -> egui::Frame {
@@ -5497,6 +5527,62 @@ impl RustNotePadApp {
         let size = self.theme_manager.active_theme().fonts.ui_size as f32 + 2.0;
         ui.add(egui::Button::new(self.icon_text(icon, size)).frame(false))
             .on_hover_text(tooltip)
+    }
+
+    fn render_activity_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        activity: Activity,
+        icon: &str,
+        tooltip: &str,
+    ) {
+        let is_active = self.active_activity == activity && self.project_panel_visible;
+        let size = 22.0;
+
+        let bg_color = if is_active {
+            color32_from_color(self.palette.background)
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        let response = egui::Frame::none()
+            .fill(bg_color)
+            .inner_margin(Margin::symmetric(0.0, 10.0))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    let color = if is_active {
+                        color32_from_color(self.palette.accent)
+                    } else {
+                        color32_from_color(self.palette.editor_text).linear_multiply(0.5)
+                    };
+                    
+                    let btn_resp = ui.add(egui::Button::new(self.icon_text(icon, size).color(color)).frame(false));
+                    
+                    // Metro indicator bar on the left
+                    if is_active {
+                        let rect = ui.min_rect();
+                        let indicator_rect = Rect::from_min_max(
+                            pos2(rect.left(), rect.top() + 4.0),
+                            pos2(rect.left() + 3.0, rect.bottom() - 4.0)
+                        );
+                        ui.painter().rect_filled(indicator_rect, egui::Rounding::ZERO, color32_from_color(self.palette.accent));
+                    }
+                    ui.add_space(4.0);
+                    btn_resp
+                }).inner
+            })
+            .inner;
+
+        if response.clicked() {
+            if self.active_activity == activity {
+                self.project_panel_visible = !self.project_panel_visible;
+            } else {
+                self.active_activity = activity;
+                self.project_panel_visible = true;
+            }
+        }
+        response.on_hover_text(tooltip);
     }
 
     fn ensure_fonts(&mut self, ctx: &egui::Context) {
@@ -5602,47 +5688,72 @@ impl RustNotePadApp {
         }
     }
 
-    fn get_file_icon(&self, filename: &str) -> &'static str {
+    fn get_file_info(&self, filename: &str) -> (&'static str, Color32) {
         let lower = filename.to_lowercase();
         if lower.ends_with(".rs") {
-            "🦀"
+            ("🦀", Color32::from_rgb(227, 76, 38)) // Rust Orange
+        } else if lower == "cargo.toml" || lower == "cargo.lock" {
+            ("⚙", Color32::from_rgb(212, 181, 59)) // Cargo Yellowish
         } else if lower.ends_with(".toml") || lower.ends_with(".yaml") || lower.ends_with(".yml") {
-            "⚙"
-        } else if lower.ends_with(".json") {
-            "{ }"
+            ("⚙", Color32::from_rgb(241, 196, 15)) // Yellow
+        } else if lower.ends_with(".json") || lower.ends_with(".jsonl") {
+            if lower.contains("package") {
+                ("{ }", Color32::from_rgb(203, 56, 55)) // NPM Red
+            } else {
+                ("{ }", Color32::from_rgb(241, 196, 15)) // Yellow
+            }
         } else if lower.ends_with(".md") {
-            "📄"
-        } else if lower.ends_with(".txt") {
-            "📝"
+            ("📄", Color32::from_rgb(0, 122, 204)) // VS Code Blue
+        } else if lower.ends_with(".txt") || lower == "license" || lower == "license.txt" {
+            ("📝", Color32::from_rgb(180, 180, 180)) // Grey
         } else if lower.ends_with(".py") {
-            "🐍"
+            ("🐍", Color32::from_rgb(53, 114, 165)) // Python Blue
         } else if lower.ends_with(".js") || lower.ends_with(".ts") {
-            "📜"
+            ("📜", Color32::from_rgb(241, 231, 64)) // JS Yellow
         } else if lower.ends_with(".html") || lower.ends_with(".css") {
-            "🎨"
+            ("🎨", Color32::from_rgb(227, 76, 38)) // HTML Orange
         } else if lower.ends_with(".c") || lower.ends_with(".cpp") || lower.ends_with(".h") {
-            "⚡"
+            ("⚡", Color32::from_rgb(104, 158, 204)) // C++ Blue
         } else if lower.ends_with(".sh") || lower.ends_with(".bash") {
-            "💻"
+            ("💻", Color32::from_rgb(141, 193, 73)) // Bash Green
+        } else if lower.starts_with(".git") {
+            ("🚩", Color32::from_rgb(240, 81, 51)) // Git Red-Orange
+        } else if lower.ends_with(".properties") {
+            ("⚙", Color32::from_rgb(79, 142, 112)) // Greenish
+        } else if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".ico") {
+            ("🖼", Color32::from_rgb(204, 62, 68)) // Image Red
         } else {
-            "📄"
+            ("📄", Color32::from_rgb(150, 150, 150)) // Default Grey
+        }
+    }
+
+    fn get_folder_info(&self, folder_name: &str) -> (&'static str, Color32) {
+        let lower = folder_name.to_lowercase();
+        if lower == "src" || lower == "apps" || lower == "app" {
+            ("📂", Color32::from_rgb(18, 115, 50)) // Greenish
+        } else if lower == "assets" || lower == "bin" || lower == "tests" || lower == "test" || lower == "changes" || lower == "docs" || lower == "e2e" || lower == "docker" || lower == "scripts" {
+            ("📂", Color32::from_rgb(204, 62, 68)) // Reddish/Pink
+        } else if lower == "target" || lower == "build" || lower == "dist" || lower == "node_modules" {
+            ("📂", Color32::from_rgb(120, 120, 120)) // Grey/Neutral
+        } else if lower == "crates" || lower == "project" || lower == "rustnotepad_gui" || lower.contains("test") {
+            ("📂", Color32::from_rgb(212, 181, 59)) // Yellowish/Brown
+        } else if lower.starts_with('.') {
+            ("📂", Color32::from_rgb(130, 130, 130)) // Dotted folder grey
+        } else {
+            ("📂", Color32::from_rgb(212, 181, 59)) // Standard Folder Yellow
         }
     }
 
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
+        let border_color = color32_from_color(self.palette.editor_text).linear_multiply(0.15);
         egui::TopBottomPanel::top("menu_bar")
             .resizable(false)
             .frame(
                 egui::Frame::none()
                     .fill(color32_from_color(self.palette.panel))
                     .inner_margin(Margin::symmetric(8.0, 4.0))
-                    .rounding(egui::Rounding {
-                        nw: 8.0,
-                        ne: 8.0,
-                        sw: 0.0,
-                        se: 0.0,
-                    })
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(204, 204, 204))),
+                    .rounding(egui::Rounding::ZERO)
+                    .stroke(egui::Stroke::new(1.0, border_color)),
             )
             .show(ctx, |ui| {
                 let menu_bar_rect = ui.max_rect();
@@ -5766,6 +5877,7 @@ impl RustNotePadApp {
     }
 
     fn show_toolbar(&mut self, ctx: &egui::Context) {
+        let border_color = color32_from_color(self.palette.editor_text).linear_multiply(0.15);
         egui::TopBottomPanel::top("toolbar")
             .resizable(false)
             .exact_height(32.0)
@@ -5773,7 +5885,7 @@ impl RustNotePadApp {
                 egui::Frame::none()
                     .fill(color32_from_color(self.palette.panel))
                     .inner_margin(Margin::symmetric(8.0, 4.0))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(204, 204, 204))),
+                    .stroke(egui::Stroke::new(1.0, border_color)),
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -5875,81 +5987,52 @@ impl RustNotePadApp {
 
     fn render_project_panel(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.set_min_height(height);
+        
+        // Make the file list more compact like VS Code
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().indent = 8.0; // even smaller indent
+        ui.spacing_mut().button_padding = vec2(4.0, 0.0);
+        
         egui::ScrollArea::both()
             .max_height(height)
             .show(ui, |ui| {
-                // Close button row - compact style
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if self
-                        .icon_button(
-                            ui,
-                            ICON_XMARK,
-                            &self.localized("Hide file browser", "關閉檔案瀏覽"),
-                        )
-                        .clicked()
-                    {
-                        self.project_panel_visible = false;
-                        self.persist_panel_visibility("view.project_panel_visible", false);
-                    }
-                });
-                
                 // Show loading indicator if directory is being loaded
                 if self.project_tree_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(self.localized("Loading...", "載入中..."));
+                        ui.label(RichText::new(self.localized("Loading...", "載入中...")).size(12.0));
                     });
                 }
                 
-                // Navigation entry: "." - navigate to filesystem root
-                let nav_enabled = !self.project_tree_loading;
-                if ui
-                    .add_enabled(nav_enabled, egui::SelectableLabel::new(false, "."))
-                    .on_hover_text(self.localized(
-                        "Navigate to filesystem root",
-                        "切換到檔案系統根目錄",
-                    ))
-                    .clicked()
-                {
-                    let root_path = if cfg!(windows) {
-                        PathBuf::from("C:\\")
-                    } else {
-                        PathBuf::from("/")
-                    };
-                    // Start async loading
-                    self.project_tree_receiver = Some(build_filesystem_project_tree_async(root_path.clone(), 4, 200));
-                    self.project_tree_loading = true;
-                    self.workspace_root = root_path;
-                    log_info(self.localized_owned(
-                        "Loading filesystem root...".to_string(),
-                        "正在載入檔案系統根目錄...".to_string(),
-                    ));
-                }
+                // Workspace name header
+                let workspace_name = self.workspace_root.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("WORKSPACE");
+                
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("⌄ {}", workspace_name.to_uppercase()))
+                        .size(11.0)
+                        .strong()
+                        .color(color32_from_color(self.palette.editor_text).linear_multiply(0.6)));
+                });
+                ui.add_space(2.0);
 
-                // Navigation entry: ".." - navigate to parent directory
-                if ui
-                    .add_enabled(nav_enabled, egui::SelectableLabel::new(false, ".."))
-                    .on_hover_text(self.localized(
-                        "Navigate to parent directory",
-                        "返回上層目錄",
-                    ))
-                    .clicked()
-                {
-                    if let Some(parent_path) = self.workspace_root.parent().map(|p| p.to_path_buf()) {
-                        // Start async loading
-                        self.project_tree_receiver = Some(build_filesystem_project_tree_async(parent_path.clone(), 4, 200));
-                        self.project_tree_loading = true;
-                        self.workspace_root = parent_path;
-                        log_info(self.localized_owned(
-                            "Loading parent directory...".to_string(),
-                            "正在載入上層目錄...".to_string(),
-                        ));
-                    } else {
-                        log_info(self.localized_owned(
-                            "Already at filesystem root".to_string(),
-                            "已在檔案系統根目錄".to_string(),
-                        ));
-                    }
+                let nav_enabled = !self.project_tree_loading;
+                // Only show parent navigation if not at root
+                if self.workspace_root.parent().is_some() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(nav_enabled, egui::Label::new(RichText::new(" .. (Parent)").size(12.0)).sense(egui::Sense::click()))
+                            .clicked()
+                        {
+                            if let Some(parent_path) = self.workspace_root.parent().map(|p| p.to_path_buf()) {
+                                self.project_tree_receiver = Some(build_filesystem_project_tree_async(parent_path.clone(), 4, 200));
+                                self.project_tree_loading = true;
+                                self.workspace_root = parent_path;
+                            }
+                        }
+                    });
                 }
 
                 let root_children = self.project_tree.root.children.clone();
@@ -6263,17 +6346,9 @@ impl RustNotePadApp {
     }
 
     fn render_find_results_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(self.localized("Search Results", "搜尋結果"));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.icon_button(ui, ICON_XMARK, &self.localized("Close", "關閉")).clicked() {
-                    self.find_status = None;
-                    self.search_report = None;
-                }
-            });
-        });
-        ui.separator();
-
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().button_padding = vec2(4.0, 0.0);
+        
         // 顯示搜尋狀態 (例如：在第 X 行找到結果)
         if let Some(status) = &self.find_status {
             let color = if status.is_error {
@@ -6281,7 +6356,7 @@ impl RustNotePadApp {
             } else {
                 Color32::from_rgb(34, 197, 94)
             };
-            ui.colored_label(color, &status.text);
+            ui.label(RichText::new(&status.text).color(color).size(12.0));
             ui.separator();
         }
 
@@ -6309,20 +6384,25 @@ impl RustNotePadApp {
                     let show_file_heading = results.len() > 1;
                     
                     if show_file_heading {
-                        let file_icon = entry
+                        let (file_icon, icon_color) = entry
                             .path
                             .as_ref()
                             .and_then(|p| p.file_name())
                             .and_then(|n| n.to_str())
-                            .map(|n| self.get_file_icon(n))
-                            .unwrap_or("📄");
-                        ui.label(format!("{} {}", file_icon, file_label));
+                            .map(|n| self.get_file_info(n))
+                            .unwrap_or(("📄", Color32::from_rgb(150, 150, 150)));
+                        
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(file_icon).color(icon_color).size(12.0));
+                            ui.label(RichText::new(file_label).size(12.0).strong());
+                        });
                     }
 
                     for hit in &entry.matches {
                         let snippet = truncate_snippet(&hit.line_text, 60);
                         let label = format!("{}: {}", hit.line, snippet);
-                        if ui.selectable_label(false, label).clicked() {
+                        if ui.add(egui::Label::new(RichText::new(label).size(12.0)).sense(egui::Sense::click()))
+                            .clicked() {
                             self.jump_to_search_match(hit);
                         }
                     }
@@ -6427,24 +6507,76 @@ impl RustNotePadApp {
     }
 
     fn show_editor_area(&mut self, ctx: &egui::Context) {
-        let has_search_results = self.search_report.as_ref().map(|r| r.total_matches > 0).unwrap_or(false);
-        let has_find_status = self.find_status.is_some();
+        let border_color = color32_from_color(self.palette.editor_text).linear_multiply(0.15);
         
-        // 如果有搜尋結果或搜尋狀態，顯示搜尋結果面板；否則顯示項目面板
-        if has_search_results || has_find_status {
-            egui::SidePanel::left("left_panel")
-                .resizable(true)
-                .default_width(PROJECT_PANEL_WIDTH)
-                .show(ctx, |ui| {
-                    self.render_find_results_panel(ui);
+        // 1. Navigation Sidebar (Activity Bar) - Metro Style
+        egui::SidePanel::left("activity_bar")
+            .resizable(false)
+            .exact_width(48.0)
+            .frame(egui::Frame::none()
+                .fill(color32_from_color(self.palette.panel))
+                .stroke(egui::Stroke::new(1.0, border_color)))
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                self.render_activity_button(ui, Activity::Explorer, ICON_FOLDER, "Explorer");
+                self.render_activity_button(ui, Activity::Search, ICON_SEARCH, "Search");
+                self.render_activity_button(ui, Activity::Functions, ICON_CODE, "Functions");
+                self.render_activity_button(ui, Activity::Plugins, ICON_PUZZLE, "Plugins");
+                
+                ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if self.icon_button(ui, ICON_SETTINGS, "Settings").clicked() {
+                        self.show_settings_window = true;
+                    }
                 });
-        } else if self.project_panel_visible {
+            });
+
+        // 2. Secondary Sidebar Content
+        if self.project_panel_visible {
             egui::SidePanel::left("left_panel")
                 .resizable(true)
                 .default_width(PROJECT_PANEL_WIDTH)
+                .frame(egui::Frame::none()
+                    .fill(color32_from_color(self.palette.panel))
+                    .stroke(egui::Stroke::new(1.0, border_color)))
                 .show(ctx, |ui| {
-                    let height = ui.available_height();
-                    self.render_project_panel(ui, height);
+                    let title = match self.active_activity {
+                        Activity::Explorer => self.localized("Explorer", "檔案瀏覽"),
+                        Activity::Search => self.localized("Search", "搜尋結果"),
+                        Activity::Functions => self.localized("Functions", "函數清單"),
+                        Activity::Plugins => self.localized("Plugins", "外掛管理"),
+                    };
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(title.to_uppercase()).size(12.0).strong().color(color32_from_color(self.palette.editor_text).linear_multiply(0.8)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if self.icon_button(ui, ICON_XMARK, "Close Panel").clicked() {
+                                self.project_panel_visible = false;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.separator();
+
+                    match self.active_activity {
+                        Activity::Explorer => {
+                            let height = ui.available_height();
+                            self.render_project_panel(ui, height);
+                        }
+                        Activity::Search => {
+                            self.render_find_results_panel(ui);
+                        }
+                        Activity::Functions => {
+                            self.render_function_list_panel(ui);
+                        }
+                        Activity::Plugins => {
+                             ui.vertical_centered(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(RichText::new(self.localized("Manage your extensions", "管理外掛擴充")).size(12.0));
+                            });
+                        }
+                    }
                 });
         }
 
@@ -6869,13 +7001,15 @@ impl RustNotePadApp {
     }
 
     fn render_function_list_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading(self.text("function.heading").to_string());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.spacing_mut().button_padding = vec2(4.0, 0.0);
+        
         match self
             .function_registry
             .parse(self.current_language_id.as_str(), &self.editor_preview)
         {
             Some(entries) if !entries.is_empty() => {
-                for entry in entries.iter().take(10) {
+                for entry in entries.iter().take(20) {
                     let line = line_number_for_range(&self.editor_preview, &entry.range);
                     let label = self.format_indexed(
                         "function.entry_label",
@@ -6885,21 +7019,20 @@ impl RustNotePadApp {
                             line.to_string(),
                         ],
                     );
-                    if ui
-                        .selectable_label(false, label)
+                    if ui.add(egui::Label::new(RichText::new(label).size(12.0)).sense(egui::Sense::click()))
                         .on_hover_text(self.text("function.navigate_hover").to_string())
                         .clicked()
                     {
                         self.apply_caret_position(Some(line as u32), Some(1));
                     }
                 }
-                if entries.len() > 10 {
-                    let remaining = entries.len() - 10;
-                    ui.label(self.format_indexed("function.more", &[remaining.to_string()]));
+                if entries.len() > 20 {
+                    let remaining = entries.len() - 20;
+                    ui.label(RichText::new(self.format_indexed("function.more", &[remaining.to_string()])).size(12.0).italics());
                 }
             }
             _ => {
-                ui.label(self.text("function.no_symbols").to_string());
+                ui.label(RichText::new(self.text("function.no_symbols").to_string()).size(12.0));
             }
         }
     }
@@ -7253,20 +7386,15 @@ impl RustNotePadApp {
         } else {
             color32_from_color(self.palette.panel)
         };
-        let stroke_color = if is_active {
-            color32_from_color(self.palette.accent)
-        } else {
-            Color32::from_rgb(100, 100, 100)
-        };
 
         // All tabs should have a consistent height of 20.0
         let frame_height = 20.0;
 
-        egui::Frame::none()
+        let frame_resp = egui::Frame::none()
             .fill(bg_color)
-            .stroke(egui::Stroke::new(1.0, stroke_color))
-            .rounding(egui::Rounding::same(3.0))
-            .inner_margin(egui::Margin::symmetric(6.0, (frame_height - 14.0) / 2.0))
+            .stroke(egui::Stroke::new(1.0, color32_from_color(self.palette.editor_text).linear_multiply(0.1)))
+            .rounding(egui::Rounding::ZERO)
+            .inner_margin(egui::Margin::symmetric(10.0, (frame_height - 14.0) / 2.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(frame_height);
@@ -7321,31 +7449,49 @@ impl RustNotePadApp {
                     }
                 });
             });
+
+        // Metro indicator line at the bottom of active tab
+        if is_active {
+            let rect = frame_resp.response.rect;
+            ui.painter().line_segment(
+                [pos2(rect.left(), rect.bottom() - 1.0), pos2(rect.right(), rect.bottom() - 1.0)],
+                egui::Stroke::new(2.0, color32_from_color(self.palette.accent_text)),
+            );
+        }
         
         ui.add_space(2.0);
     }
 
     fn render_project_node(&mut self, ui: &mut egui::Ui, node: &ProjectNode, depth: usize) {
-        let indent = "  ".repeat(depth);
+        let node_id = egui::Id::new(&node.name).with(depth);
+        let text_color = color32_from_color(self.palette.editor_text);
+        
         match &node.kind {
             ProjectNodeKind::File { path } => {
-                let icon = self.get_file_icon(&node.name);
-                let label = format!("{}{} {}", indent, icon, node.name);
+                let (icon, icon_color) = self.get_file_info(&node.name);
                 let path_display = path.to_string_lossy();
-                if ui
-                    .selectable_label(false, label)
-                    .on_hover_text(self.text("explorer.open_document_hover").to_string())
-                    .clicked()
-                {
+                
+                let resp = ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon).color(icon_color).size(12.0));
+                    ui.label(RichText::new(&node.name).color(text_color).size(12.0))
+                }).response.interact(egui::Sense::click());
+
+                if resp.clicked() {
                     self.open_document(path_display.as_ref(), &node.name);
+                }
+                if resp.hovered() {
+                    resp.on_hover_text(self.text("explorer.open_document_hover").to_string());
                 }
             }
             ProjectNodeKind::Folder { .. } => {
-                let icon = "📁";
-                let label = format!("{}{} {}", indent, icon, node.name);
-                egui::CollapsingHeader::new(label)
-                    .default_open(depth < 2)
-                    .show(ui, |ui| {
+                let (icon, icon_color) = self.get_folder_info(&node.name);
+                
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), node_id, depth < 2)
+                    .show_header(ui, |ui| {
+                        ui.label(RichText::new(icon).color(icon_color).size(12.0));
+                        ui.label(RichText::new(&node.name).color(text_color).size(12.0));
+                    })
+                    .body(|ui| {
                         for child in node.children.iter() {
                             self.render_project_node(ui, child, depth + 1);
                         }
@@ -7353,8 +7499,11 @@ impl RustNotePadApp {
             }
             ProjectNodeKind::Virtual { subtype, .. } => {
                 let icon = "⚙";
-                let label = format!("{}{} {} ({})", indent, icon, node.name, subtype);
-                ui.label(RichText::new(label).color(color32_from_color(self.palette.editor_text)));
+                let icon_color = Color32::from_rgb(150, 150, 150);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon).color(icon_color).size(12.0));
+                    ui.label(RichText::new(format!("{} ({})", node.name, subtype)).color(text_color).size(12.0));
+                });
             }
         }
     }
