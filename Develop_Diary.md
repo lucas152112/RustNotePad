@@ -1,5 +1,22 @@
 # Develop Diary / 開發日誌
 
+## 2026-01-21
+
+### 完成 / Completed
+- 實作無邊框視窗之角落拖拉縮放：在視窗四個角落新增隱形感應區，支援按住滑鼠左鍵調整視窗大小，並自動切換對應的縮放游標（NWSE/NESW）。 / Implemented corner-drag resizing for borderless window: added invisible interaction areas at all four window corners, supporting left-click drag to resize with context-aware cursors (NWSE/NESW).
+- 實作視窗調整後自動更新 UI 縮放比例：在視窗調整寬度後，自動根據新的物理解析度更新全域 UI 縮放因子 (Zoom Factor)，確保內容比例隨視窗大小動態適配。 / Implemented automatic UI zoom update after resize: automatically recalculates and applies the global UI zoom factor based on the new physical resolution after window width changes, ensuring dynamic content scaling.
+
+## 2026-01-15
+
+### 完成 / Completed
+- 全面導入 Metro (Modern) 設計語法：將應用程式視覺風格重塑為扁平化、直角化 (Rounding: 0.0) 的現代設計。 / Complete Metro (Modern) design overhaul: refactored app visuals to a flat, sharp-edged (Rounding: 0.0) modern design.
+- 新增活動側邊欄 (Activity Bar)：實作類似 VS Code 的左側功能選單，整合檔案瀏覽、搜尋、函數清單與外掛管理，並支援中文字型最佳化。 / Added Activity Bar: implemented a VS Code-like sidebar for Explorer, Search, Functions, and Plugins, optimized for CJK fonts.
+- 優化檔案瀏覽器佈局速度與密度：實作緊湊型列表佈局，移除不必要的垂直間距 (item_spacing.y: 0.0) 並縮小字級 (12.0)，大幅提升導覽效率。 / Optimized File Explorer density: implemented compact list layout, removed unnecessary vertical spacing (item_spacing.y: 0.0), and reduced font size (12.0) for better navigation efficiency.
+- 實作智慧型屬性圖示著色：為檔案瀏覽器中的目錄與文件加入類型感知的色彩圖示（例如 Rust 橘、Markdown 藍、npm 紅等），增強視覺辨識度。 / Implemented smart attribute icon coloring: added type-aware colored icons to File Explorer (e.g., Rust orange, Markdown blue, npm red), enhancing visual recognition.
+- 優化函數清單 (Symbol List)：同步套用緊湊型佈局與統一標題風格，並提升預覽數量至 20 個項目。 / Optimized Function List (Symbol List): synchronized compact layout and unified heading styles, increasing preview count to 20 items.
+- 修正搜尋圖示：將搜尋按鈕圖示更換為更直覺的放大鏡 (🔍)，符合主流軟體規範。 / Fixed search icon: updated search button icon to a more intuitive magnifying glass (🔍).
+- 修正工作區編譯錯誤：移除 `Cargo.toml` 中不存在的成員路徑，確保跨平台開發環境可正確編譯。 / Fixed workspace compilation errors: removed non-existent member paths in `Cargo.toml`, ensuring successful build across platforms.
+
 ## 2026-01-11
 
 ### 完成 / Completed

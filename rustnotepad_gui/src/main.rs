@@ -1869,6 +1869,7 @@ struct RustNotePadApp {
     search_report: Option<SearchReport>,
     #[cfg(target_os = "windows")]
     windows_handles: WindowsSessionHandles,
+    is_resizing_window: bool,
 }
 
 impl Default for RustNotePadApp {
@@ -2298,6 +2299,7 @@ impl RustNotePadApp {
             search_report: None,
             #[cfg(target_os = "windows")]
             windows_handles,
+            is_resizing_window: false,
         };
         app.status.refresh_cursor(&app.editor_preview);
         app.refresh_completions();
@@ -3907,6 +3909,93 @@ impl RustNotePadApp {
                 format!("未支援的說明指令 {item_key}"),
             )),
         }
+    }
+
+    fn handle_window_resizing(&mut self, ctx: &egui::Context) {
+        let screen_rect = ctx.screen_rect();
+        let handle_size = 12.0;
+
+        // NW
+        self.show_resize_corner(
+            ctx,
+            "resize_nw",
+            Rect::from_min_size(screen_rect.min, vec2(handle_size, handle_size)),
+            egui::viewport::ResizeDirection::NorthWest,
+            egui::CursorIcon::ResizeNwSe,
+        );
+        // NE
+        self.show_resize_corner(
+            ctx,
+            "resize_ne",
+            Rect::from_min_size(
+                pos2(screen_rect.max.x - handle_size, screen_rect.min.y),
+                vec2(handle_size, handle_size),
+            ),
+            egui::viewport::ResizeDirection::NorthEast,
+            egui::CursorIcon::ResizeNeSw,
+        );
+        // SW
+        self.show_resize_corner(
+            ctx,
+            "resize_sw",
+            Rect::from_min_size(
+                pos2(screen_rect.min.x, screen_rect.max.y - handle_size),
+                vec2(handle_size, handle_size),
+            ),
+            egui::viewport::ResizeDirection::SouthWest,
+            egui::CursorIcon::ResizeNeSw,
+        );
+        // SE
+        self.show_resize_corner(
+            ctx,
+            "resize_se",
+            Rect::from_min_size(
+                screen_rect.max - vec2(handle_size, handle_size),
+                vec2(handle_size, handle_size),
+            ),
+            egui::viewport::ResizeDirection::SouthEast,
+            egui::CursorIcon::ResizeNwSe,
+        );
+
+        if self.is_resizing_window {
+            if ctx.input(|i| !i.pointer.any_down()) {
+                self.is_resizing_window = false;
+                let current_zoom = ctx.zoom_factor();
+                let width_points = screen_rect.width();
+                let physical_width = width_points * current_zoom;
+                let zoom = (physical_width / 1280.0).clamp(0.5, 3.0);
+                ctx.set_zoom_factor(zoom);
+                log_info(format!(
+                    "Window resize finished. Physical width: {:.0}, UI zoom factor set to: {:.2}",
+                    physical_width, zoom
+                ));
+            }
+        }
+    }
+
+    fn show_resize_corner(
+        &mut self,
+        ctx: &egui::Context,
+        id_source: &str,
+        rect: Rect,
+        edge: egui::viewport::ResizeDirection,
+        cursor: egui::CursorIcon,
+    ) {
+        egui::Area::new(egui::Id::new(id_source))
+            .fixed_pos(rect.min)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_max_size(rect.size());
+                let response = ui.allocate_response(rect.size(), egui::Sense::drag());
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(cursor);
+                }
+                if response.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(edge));
+                    self.is_resizing_window = true;
+                }
+            });
     }
 
     fn apply_encoding_selection(
@@ -7626,6 +7715,8 @@ impl App for RustNotePadApp {
         self.render_file_dialogs(ctx);
         self.show_print_preview_window(ctx);
         self.render_help_windows(ctx);
+
+        self.handle_window_resizing(ctx);
 
         if self.pending_exit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
