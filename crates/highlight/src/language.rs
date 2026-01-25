@@ -61,16 +61,25 @@ pub struct LanguageDefinition {
     pub case_sensitive: bool,
     pub keywords: Vec<String>,
 
-    keyword_regex: Option<Regex>,
-    operator_regex: Option<Regex>,
-    number_regex: Regex,
-    line_comment: Option<String>,
-    block_comment: Option<BlockComment>,
-    string_delimiters: Vec<StringDelimiter>,
-    additional_rules: Vec<PatternRule>,
+    pub(crate) keyword_regex: Option<Regex>,
+    pub(crate) operator_regex: Option<Regex>,
+    pub(crate) number_regex: Regex,
+    pub(crate) line_comment: Option<String>,
+    pub(crate) block_comment: Option<BlockComment>,
+    pub(crate) string_delimiters: Vec<StringDelimiter>,
+    pub(crate) additional_rules: Vec<PatternRule>,
 }
 
 impl LanguageDefinition {
+    pub fn add_rule(&mut self, pattern: &str, kind: HighlightKind) -> Result<(), HighlightError> {
+        let regex = RegexBuilder::new(pattern)
+            .case_insensitive(!self.case_sensitive)
+            .build()
+            .map_err(|e| HighlightError::RegexCompilation(e.to_string()))?;
+        self.additional_rules.push(PatternRule { regex, kind });
+        Ok(())
+    }
+
     pub fn from_udl(udl: UdlDefinition) -> Result<Self, HighlightError> {
         let id = LanguageId::from(udl.identifier.clone().unwrap_or_else(|| udl.name.clone()));
         let keywords = udl.keywords.clone();
@@ -149,20 +158,20 @@ impl LanguageDefinition {
             &mut occupied,
         );
 
-        if let Some(regex) = &self.operator_regex {
+        for rule in &self.additional_rules {
             highlight_with_regex(
-                regex,
-                HighlightKind::Operator,
+                &rule.regex,
+                rule.kind.clone(),
                 input,
                 &mut tokens,
                 &mut occupied,
             );
         }
 
-        for rule in &self.additional_rules {
+        if let Some(regex) = &self.operator_regex {
             highlight_with_regex(
-                &rule.regex,
-                rule.kind.clone(),
+                regex,
+                HighlightKind::Operator,
                 input,
                 &mut tokens,
                 &mut occupied,
@@ -175,22 +184,22 @@ impl LanguageDefinition {
 }
 
 #[derive(Debug, Clone)]
-struct BlockComment {
-    start: String,
-    end: String,
+pub(crate) struct BlockComment {
+    pub(crate) start: String,
+    pub(crate) end: String,
 }
 
 #[derive(Debug, Clone)]
-struct StringDelimiter {
-    start: String,
-    end: String,
-    escape: Option<char>,
+pub(crate) struct StringDelimiter {
+    pub(crate) start: String,
+    pub(crate) end: String,
+    pub(crate) escape: Option<char>,
 }
 
 #[derive(Debug, Clone)]
-struct PatternRule {
-    regex: Regex,
-    kind: HighlightKind,
+pub(crate) struct PatternRule {
+    pub(crate) regex: Regex,
+    pub(crate) kind: HighlightKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -491,7 +500,7 @@ pub mod builtin {
     use super::*;
 
     pub fn builtins() -> Vec<LanguageDefinition> {
-        vec![rust(), json(), plaintext()]
+        vec![rust(), json(), markdown(), plaintext()]
     }
 
     fn rust() -> LanguageDefinition {
@@ -526,6 +535,45 @@ pub mod builtin {
             case_sensitive: true,
         };
         LanguageDefinition::from_udl(udl).expect("built-in rust UDL should parse")
+    }
+
+    fn markdown() -> LanguageDefinition {
+        let udl = UdlDefinition {
+            name: "Markdown".into(),
+            identifier: Some("markdown".into()),
+            extensions: vec!["md".into(), "markdown".into()],
+            keywords: Vec::new(),
+            line_comment: None,
+            block_comment: None,
+            delimiters: Vec::new(),
+            number_pattern: None,
+            operators: vec![">".into(), "-".into(), "*".into()],
+            case_sensitive: true,
+        };
+        let mut def = LanguageDefinition::from_udl(udl).expect("markdown UDL should parse");
+
+        // Headers: Match the whole line for consistent coloring and sizing
+        def.add_rule(r"(?m)^#\s+.*", HighlightKind::Custom("h1".into()))
+            .ok();
+        def.add_rule(r"(?m)^##\s+.*", HighlightKind::Custom("h2".into()))
+            .ok();
+        def.add_rule(r"(?m)^###+\s+.*", HighlightKind::Custom("h3".into()))
+            .ok();
+
+        // Inline code: `text` - match backtick pair and content including empty backticks
+        def.add_rule(r"`[^`]*`", HighlightKind::Custom("md_code".into())).ok();
+        
+        // Bold/Italic - matching symbols only or simple groups
+        def.add_rule(r"\*\*|__", HighlightKind::String).ok();
+        def.add_rule(r"\*|_", HighlightKind::String).ok();
+        
+        // Links: [text](url)
+        def.add_rule(r"\[.*?\]\(.*?\)", HighlightKind::Operator).ok();
+        
+        // Operators and formatting markers (NOT including / and `)
+        def.add_rule(r">", HighlightKind::Operator).ok();
+
+        def
     }
 
     fn json() -> LanguageDefinition {

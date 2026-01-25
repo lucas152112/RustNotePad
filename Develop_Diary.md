@@ -1,5 +1,12 @@
 # Develop Diary / 開發日誌
 
+## 2026-01-25
+
+### 完成 / Completed
+- 修正 Markdown 顯示為獨立渲染：調整 Markdown 專用的高亮規則與渲染流程，避免與純文字共用處理導致樣式污染。 / Fixed Markdown standalone rendering: refined Markdown-specific highlight rules and rendering pipeline to avoid style bleed from plain text.
+- 修正符號「/」「`」顯示：移除它們作為操作符的特殊處理，改為普通文字顯示，同時保留反引號內文字的代碼著色。 / Fixed “/” and “`” rendering: removed operator treatment so they render as plain text while keeping code color for text between backticks.
+- 修正英文字母大小寫異常：移除圖示字型混入文字字型族群的行為，並優先載入使用者設定的編輯器等寬字型以保留原始大小寫。 / Fixed incorrect uppercasing: stopped icon fonts from being injected into text families and prioritized the configured editor monospace font to preserve original casing.
+
 ## 2026-01-21
 
 ### 完成 / Completed
