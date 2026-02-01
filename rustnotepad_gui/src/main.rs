@@ -1791,6 +1791,7 @@ struct RustNotePadApp {
     preferences_transfer_status: Option<UiMessage>,
     fonts_installed: bool,
     icon_font_available: bool,
+    icon_font_pending: bool, // Icon font data loaded but not yet applied by egui
     cjk_font_available: bool,
     editor_font_loaded: bool,
     font_warning: Option<String>,
@@ -2223,6 +2224,7 @@ impl RustNotePadApp {
             preferences_transfer_status: None,
             fonts_installed: false,
             icon_font_available: false,
+            icon_font_pending: false,
             cjk_font_available: false,
             editor_font_loaded: false,
             font_warning: None,
@@ -5746,9 +5748,10 @@ impl RustNotePadApp {
         }
 
         let mut definitions = FontDefinitions::default();
-
+        let mut icon_fonts_loaded = false;
         // Load Solid first (so it ends up after Regular)
         if let Some(data) = load_font_asset("Font Awesome 7 Free-Solid-900.otf") {
+            let data_len = data.len();
             let name = "Font Awesome Solid".to_string();
             definitions
                 .font_data
@@ -5758,11 +5761,15 @@ impl RustNotePadApp {
                 .entry(FontFamily::Name(ICON_FONT_NAME.into()))
                 .or_default()
                 .push(name.clone());
-            self.icon_font_available = true;
+            icon_fonts_loaded = true;
+            log_info(format!("Loaded icon font 'Font Awesome Solid' ({} bytes)", data_len));
+        } else {
+            log_warn("Failed to load Font Awesome 7 Free-Solid-900.otf");
         }
 
         // Load Regular second (so it ends up first)
         if let Some(data) = load_font_asset("Font Awesome 7 Free-Regular-400.otf") {
+            let data_len = data.len();
             let name = "Font Awesome Regular".to_string();
             definitions
                 .font_data
@@ -5772,7 +5779,10 @@ impl RustNotePadApp {
                 .entry(FontFamily::Name(ICON_FONT_NAME.into()))
                 .or_default()
                 .insert(0, name.clone());
-            self.icon_font_available = true;
+            icon_fonts_loaded = true;
+            log_info(format!("Loaded icon font 'Font Awesome Regular' ({} bytes)", data_len));
+        } else {
+            log_warn("Failed to load Font Awesome 7 Free-Regular-400.otf");
         }
 
         if let Some((name, data)) = load_cjk_font() {
@@ -5810,7 +5820,10 @@ impl RustNotePadApp {
         // Load configured editor font (monospace) first to avoid icon/CJK glyph overrides
         self.editor_font_loaded = false;
         let editor_font_family = self.preferences.editor_font_family.trim();
-        if !editor_font_family.is_empty() && editor_font_family != "monospace" {
+        if !editor_font_family.is_empty() 
+            && editor_font_family != "monospace" 
+            && editor_font_family != "System Default" 
+        {
             if let Some(data) = load_system_font(editor_font_family) {
                 let name = format!("editor_font:{}", editor_font_family);
                 definitions
@@ -5830,16 +5843,17 @@ impl RustNotePadApp {
         }
 
         ctx.set_fonts(definitions);
-        if self.icon_font_available {
-            let has_icon_family =
-                ctx.fonts(|f| f.families().contains(&FontFamily::Name(ICON_FONT_NAME.into())));
-            if !has_icon_family {
-                log_warn(format!(
-                    "Icon font family '{}' missing after registration; falling back to text icons.",
-                    ICON_FONT_NAME
-                ));
-                self.icon_font_available = false;
-            }
+        // Note: ctx.fonts() reflects the OLD font definitions at this point.
+        // The new definitions will be applied at the start of the next frame.
+        // Mark icon font as pending - it will become available on the next frame.
+        if icon_fonts_loaded {
+            self.icon_font_pending = true;
+            log_info(format!(
+                "Icon font family '{}' configured; will be active next frame.",
+                ICON_FONT_NAME
+            ));
+            // Request a repaint to trigger the next frame where fonts will be applied
+            ctx.request_repaint();
         }
         self.fonts_installed = true;
     }
@@ -7522,6 +7536,16 @@ impl<'a> MacroExecutor for AppMacroExecutor<'a> {
 
 impl App for RustNotePadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        // Activate icon font after fonts have been applied by egui (on the second frame)
+        if self.icon_font_pending && !self.icon_font_available {
+            self.icon_font_available = true;
+            self.icon_font_pending = false;
+            log_info(format!(
+                "Icon font family '{}' is now active.",
+                ICON_FONT_NAME
+            ));
+        }
+        
         if is_image_file(&self.current_document_id) && self.current_image_texture.is_none() {
             if let Some(path) = &self.current_document_path {
                 log_info(format!("Attempting to load image: {}", path.display()));
@@ -8866,49 +8890,85 @@ fn log_backend_environment(wayland_status: &BackendStatus, x11_status: &BackendS
 }
 
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    candidates.push(manifest_dir.join("assets/fonts/NotoSansTC-Regular.otf"));
-    candidates.push(manifest_dir.join("../assets/fonts/NotoSansTC-Regular.otf"));
-    candidates.push(PathBuf::from("assets/fonts/NotoSansTC-Regular.otf"));
+    // Get executable directory for local font storage
+    let exe_dir = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    let local_fonts_dir = exe_dir.as_ref().map(|d| d.join("assets/fonts"));
+    
+    // First, check local assets/fonts directory
+    if let Some(ref fonts_dir) = local_fonts_dir {
+        let local_candidates = [
+            fonts_dir.join("NotoSansTC-Regular.otf"),
+            fonts_dir.join("NotoSansCJK-Regular.ttc"),
+        ];
+        for path in &local_candidates {
+            if path.exists() {
+                if let Ok(bytes) = fs::read(path) {
+                    if FontArc::try_from_vec(bytes.clone()).is_ok() {
+                        log_info(format!("Loaded CJK font from {}", path.display()));
+                        return Some(("cjk_fallback".into(), bytes));
+                    }
+                }
+            }
+        }
+    }
+    
+    // System font candidates
+    let mut system_candidates: Vec<PathBuf> = Vec::new();
 
     #[cfg(target_os = "windows")]
     {
-        candidates.push(PathBuf::from(r"C:\Windows\Fonts\msjh.ttc"));
-        candidates.push(PathBuf::from(r"C:\Windows\Fonts\mingliu.ttc"));
-        candidates.push(PathBuf::from(r"C:\Windows\Fonts\NotoSansTC-Regular.otf"));
+        system_candidates.push(PathBuf::from(r"C:\Windows\Fonts\msjh.ttc"));
+        system_candidates.push(PathBuf::from(r"C:\Windows\Fonts\mingliu.ttc"));
+        system_candidates.push(PathBuf::from(r"C:\Windows\Fonts\NotoSansTC-Regular.otf"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        candidates.push(PathBuf::from("/System/Library/Fonts/PingFang.ttc"));
-        candidates.push(PathBuf::from(
+        system_candidates.push(PathBuf::from("/System/Library/Fonts/PingFang.ttc"));
+        system_candidates.push(PathBuf::from(
             "/System/Library/Fonts/Supplemental/Songti.ttc",
         ));
     }
 
     #[cfg(target_os = "linux")]
     {
-        candidates.push(PathBuf::from(
+        system_candidates.push(PathBuf::from(
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ));
-        candidates.push(PathBuf::from(
+        system_candidates.push(PathBuf::from(
             "/usr/share/fonts/opentype/noto/NotoSansTC-Regular.otf",
         ));
-        candidates.push(PathBuf::from(
+        system_candidates.push(PathBuf::from(
             "/usr/share/fonts/truetype/noto/NotoSansTC-Regular.ttf",
         ));
     }
 
-    for path in candidates {
+    // Try to load from system paths and copy to local if found
+    for path in system_candidates {
         if !path.exists() {
             continue;
         }
         match fs::read(&path) {
             Ok(bytes) => match FontArc::try_from_vec(bytes.clone()) {
                 Ok(_) => {
-                    log_info(format!("Loaded CJK font from {}", path.display()));
+                    log_info(format!("Loaded CJK font from system: {}", path.display()));
+                    
+                    // Copy to local assets/fonts directory for future use
+                    if let Some(ref fonts_dir) = local_fonts_dir {
+                        if let Some(filename) = path.file_name() {
+                            let local_path = fonts_dir.join(filename);
+                            if !local_path.exists() {
+                                if let Err(e) = fs::create_dir_all(fonts_dir) {
+                                    log_warn(format!("Failed to create fonts directory: {}", e));
+                                } else if let Err(e) = fs::write(&local_path, &bytes) {
+                                    log_warn(format!("Failed to copy font to {}: {}", local_path.display(), e));
+                                } else {
+                                    log_info(format!("Copied CJK font to {}", local_path.display()));
+                                }
+                            }
+                        }
+                    }
+                    
                     return Some(("cjk_fallback".into(), bytes));
                 }
                 Err(err) => log_warn(format!(
@@ -8925,77 +8985,138 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
 
 /// Load a system font by family name
 /// Uses direct file paths for common fonts to avoid slow font-kit queries
+/// Automatically copies system fonts to local assets/fonts/ for portability
 /// TODO: Enable when font loading is properly implemented
 #[allow(dead_code)]
 fn load_system_font(font_family: &str) -> Option<Vec<u8>> {
-    // Get user font directory
-    let home = env::var("HOME").unwrap_or_default();
-    let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+    // Get executable directory for local font storage
+    let exe_dir = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    let local_fonts_dir = exe_dir.as_ref().map(|d| d.join("assets/fonts"));
     
-    // Map font family names to common file paths
-    let font_paths: Vec<PathBuf> = match font_family {
-        "Fira Code" => vec![
-            user_fonts.join("FiraCode-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/opentype/firacode/FiraCode-Regular.otf"),
-            PathBuf::from("/usr/share/fonts/TTF/FiraCode-Regular.ttf"),
-        ],
-        "JetBrains Mono" => vec![
-            user_fonts.join("JetBrainsMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/opentype/jetbrains-mono/JetBrainsMono-Regular.otf"),
-            PathBuf::from("/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"),
-        ],
-        "DejaVu Sans Mono" => vec![
-            user_fonts.join("DejaVuSansMono.ttf"),
-            PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
-            PathBuf::from("/usr/share/fonts/TTF/DejaVuSansMono.ttf"),
-        ],
-        "Liberation Mono" => vec![
-            user_fonts.join("LiberationMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/TTF/LiberationMono-Regular.ttf"),
-        ],
-        "Ubuntu Mono" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"),
-            PathBuf::from("/usr/share/fonts/TTF/UbuntuMono-R.ttf"),
-        ],
-        "Noto Sans Mono" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansMono-Regular.otf"),
-            PathBuf::from("/usr/share/fonts/TTF/NotoSansMono-Regular.ttf"),
-        ],
-        "Source Code Pro" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/source-code-pro/SourceCodePro-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/opentype/source-code-pro/SourceCodePro-Regular.otf"),
-            PathBuf::from("/usr/share/fonts/adobe-source-code-pro/SourceCodePro-Regular.otf"),
-        ],
-        "Hack" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/hack/Hack-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/TTF/Hack-Regular.ttf"),
-        ],
-        "Inconsolata" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/inconsolata/Inconsolata-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/opentype/inconsolata/Inconsolata-Regular.otf"),
-            PathBuf::from("/usr/share/fonts/TTF/Inconsolata-Regular.ttf"),
-        ],
-        "Roboto Mono" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/roboto/RobotoMono-Regular.ttf"),
-            PathBuf::from("/usr/share/fonts/TTF/RobotoMono-Regular.ttf"),
-        ],
-        "Sarasa Mono TC" | "Sarasa Term TC" => vec![
-            PathBuf::from("/usr/share/fonts/truetype/sarasa/sarasa-mono-tc-regular.ttf"),
-            PathBuf::from("/usr/share/fonts/sarasa-gothic/sarasa-mono-tc-regular.ttf"),
-        ],
-        _ => vec![],
+    // Map font family names to expected local filenames and system paths
+    let (local_filenames, system_paths): (Vec<&str>, Vec<PathBuf>) = match font_family {
+        "Fira Code" => {
+            let home = env::var("HOME").unwrap_or_default();
+            let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+            (vec!["FiraCode-Regular.ttf", "FiraCode-Regular.otf"], vec![
+                user_fonts.join("FiraCode-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/opentype/firacode/FiraCode-Regular.otf"),
+                PathBuf::from("/usr/share/fonts/TTF/FiraCode-Regular.ttf"),
+            ])
+        },
+        "JetBrains Mono" => {
+            let home = env::var("HOME").unwrap_or_default();
+            let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+            (vec!["JetBrainsMono-Regular.ttf", "JetBrainsMono-Regular.otf"], vec![
+                user_fonts.join("JetBrainsMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/opentype/jetbrains-mono/JetBrainsMono-Regular.otf"),
+                PathBuf::from("/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf"),
+            ])
+        },
+        "DejaVu Sans Mono" => {
+            let home = env::var("HOME").unwrap_or_default();
+            let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+            (vec!["DejaVuSansMono.ttf"], vec![
+                user_fonts.join("DejaVuSansMono.ttf"),
+                PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+                PathBuf::from("/usr/share/fonts/TTF/DejaVuSansMono.ttf"),
+            ])
+        },
+        "Liberation Mono" => {
+            let home = env::var("HOME").unwrap_or_default();
+            let user_fonts = PathBuf::from(&home).join(".local/share/fonts");
+            (vec!["LiberationMono-Regular.ttf"], vec![
+                user_fonts.join("LiberationMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/TTF/LiberationMono-Regular.ttf"),
+            ])
+        },
+        "Ubuntu Mono" => {
+            (vec!["UbuntuMono-R.ttf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf"),
+                PathBuf::from("/usr/share/fonts/TTF/UbuntuMono-R.ttf"),
+            ])
+        },
+        "Noto Sans Mono" => {
+            (vec!["NotoSansMono-Regular.ttf", "NotoSansMono-Regular.otf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansMono-Regular.otf"),
+                PathBuf::from("/usr/share/fonts/TTF/NotoSansMono-Regular.ttf"),
+            ])
+        },
+        "Source Code Pro" => {
+            (vec!["SourceCodePro-Regular.ttf", "SourceCodePro-Regular.otf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/source-code-pro/SourceCodePro-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/opentype/source-code-pro/SourceCodePro-Regular.otf"),
+                PathBuf::from("/usr/share/fonts/adobe-source-code-pro/SourceCodePro-Regular.otf"),
+            ])
+        },
+        "Hack" => {
+            (vec!["Hack-Regular.ttf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/hack/Hack-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/TTF/Hack-Regular.ttf"),
+            ])
+        },
+        "Inconsolata" => {
+            (vec!["Inconsolata-Regular.ttf", "Inconsolata-Regular.otf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/inconsolata/Inconsolata-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/opentype/inconsolata/Inconsolata-Regular.otf"),
+                PathBuf::from("/usr/share/fonts/TTF/Inconsolata-Regular.ttf"),
+            ])
+        },
+        "Roboto Mono" => {
+            (vec!["RobotoMono-Regular.ttf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/roboto/RobotoMono-Regular.ttf"),
+                PathBuf::from("/usr/share/fonts/TTF/RobotoMono-Regular.ttf"),
+            ])
+        },
+        "Sarasa Mono TC" | "Sarasa Term TC" => {
+            (vec!["sarasa-mono-tc-regular.ttf"], vec![
+                PathBuf::from("/usr/share/fonts/truetype/sarasa/sarasa-mono-tc-regular.ttf"),
+                PathBuf::from("/usr/share/fonts/sarasa-gothic/sarasa-mono-tc-regular.ttf"),
+            ])
+        },
+        _ => (vec![], vec![]),
     };
     
-    // Try to load from known paths
-    for path in &font_paths {
+    // First, check local assets/fonts directory
+    if let Some(ref fonts_dir) = local_fonts_dir {
+        for filename in &local_filenames {
+            let local_path = fonts_dir.join(filename);
+            if local_path.exists() {
+                if let Ok(data) = fs::read(&local_path) {
+                    log_info(format!("Loaded font '{}' from {}", font_family, local_path.display()));
+                    return Some(data);
+                }
+            }
+        }
+    }
+    
+    // Try to load from system paths and copy to local if found
+    for path in &system_paths {
         if path.exists() {
             match fs::read(path) {
                 Ok(data) => {
-                    log_info(format!("Loaded font from {}", path.display()));
+                    log_info(format!("Loaded font '{}' from system: {}", font_family, path.display()));
+                    
+                    // Copy to local assets/fonts directory for future use
+                    if let Some(ref fonts_dir) = local_fonts_dir {
+                        if let Some(filename) = path.file_name() {
+                            let local_path = fonts_dir.join(filename);
+                            if !local_path.exists() {
+                                if let Err(e) = fs::create_dir_all(fonts_dir) {
+                                    log_warn(format!("Failed to create fonts directory: {}", e));
+                                } else if let Err(e) = fs::write(&local_path, &data) {
+                                    log_warn(format!("Failed to copy font to {}: {}", local_path.display(), e));
+                                } else {
+                                    log_info(format!("Copied font '{}' to {}", font_family, local_path.display()));
+                                }
+                            }
+                        }
+                    }
+                    
                     return Some(data);
                 }
                 Err(err) => {
@@ -9010,25 +9131,57 @@ fn load_system_font(font_family: &str) -> Option<Vec<u8>> {
 }
 
 fn load_font_asset(filename: &str) -> Option<Vec<u8>> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.push(manifest_dir.join(format!("assets/icon/otfs/{}", filename)));
-    candidates.push(manifest_dir.join(format!("../assets/icon/otfs/{}", filename)));
-    candidates.push(PathBuf::from(format!("assets/icon/otfs/{}", filename)));
-    if let Some(exe_dir) = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
-        candidates.push(exe_dir.join(format!("assets/icon/otfs/{}", filename)));
-        candidates.push(
-            exe_dir
-                .parent()
-                .map(|p| p.join(format!("assets/icon/otfs/{}", filename)))
-                .unwrap_or_else(|| exe_dir.join(format!("assets/icon/otfs/{}", filename))),
-        );
-    }
-    for path in candidates {
-        if let Ok(data) = fs::read(&path) {
-            return Some(data);
+    // Get executable directory for local icon font storage
+    let exe_dir = env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    let local_icon_dir = exe_dir.as_ref().map(|d| d.join("assets/icon/otfs"));
+    
+    // First, check local assets/icon/otfs directory
+    if let Some(ref icon_dir) = local_icon_dir {
+        let local_path = icon_dir.join(filename);
+        if local_path.exists() {
+            if let Ok(data) = fs::read(&local_path) {
+                log_info(format!("Loaded icon font from {}", local_path.display()));
+                return Some(data);
+            }
         }
     }
+    
+    // Source paths to search for icon fonts (project directories)
+    let source_paths: Vec<PathBuf> = vec![
+        // Current working directory (development)
+        PathBuf::from(format!("assets/icon/otfs/{}", filename)),
+        // Parent directory assets (when running from bin/)
+        PathBuf::from(format!("../assets/icon/otfs/{}", filename)),
+        // Source project root assets
+        PathBuf::from(format!("../../assets/icon/otfs/{}", filename)),
+    ];
+    
+    // Try to load from source paths and copy to local if found
+    for path in &source_paths {
+        if path.exists() {
+            if let Ok(data) = fs::read(path) {
+                log_info(format!("Loaded icon font from source: {}", path.display()));
+                
+                // Copy to local assets/icon/otfs directory for future use
+                if let Some(ref icon_dir) = local_icon_dir {
+                    let local_path = icon_dir.join(filename);
+                    if !local_path.exists() {
+                        if let Err(e) = fs::create_dir_all(icon_dir) {
+                            log_warn(format!("Failed to create icon font directory: {}", e));
+                        } else if let Err(e) = fs::write(&local_path, &data) {
+                            log_warn(format!("Failed to copy icon font to {}: {}", local_path.display(), e));
+                        } else {
+                            log_info(format!("Copied icon font '{}' to {}", filename, local_path.display()));
+                        }
+                    }
+                }
+                
+                return Some(data);
+            }
+        }
+    }
+    
+    log_warn(format!("Icon font '{}' not found in paths: {:?}", filename, source_paths));
     None
 }
 

@@ -1,5 +1,13 @@
 # Develop Diary / 開發日誌
 
+## 2026-02-01
+
+### 完成 / Completed
+- 修正 Font Awesome 圖示字型載入：解決 egui `set_fonts` 非同步特性導致的字型載入時序問題，引入 `icon_font_pending` 旗標延遲啟用圖示字型至下一幀，避免程式啟動時 panic。 / Fixed Font Awesome icon font loading: resolved font loading timing issue caused by egui's asynchronous `set_fonts` behavior, introduced `icon_font_pending` flag to delay icon font activation until next frame, preventing panic on startup.
+- 實作字型自動複製功能：當從系統載入字型時，自動複製到執行目錄的 `assets/fonts/` 或 `assets/icon/otfs/`，實現可攜式部署。 / Implemented automatic font copying: when loading fonts from system paths, automatically copy them to the executable's `assets/fonts/` or `assets/icon/otfs/` directory for portable deployment.
+- 修正字型路徑優先順序：修改 `load_cjk_font()`、`load_system_font()` 與 `load_font_asset()` 優先從執行目錄載入字型，確保發佈版本可獨立運作。 / Fixed font path priority: modified `load_cjk_font()`, `load_system_font()`, and `load_font_asset()` to prioritize loading fonts from executable directory, ensuring release builds work independently.
+- 排除 "System Default" 字型載入：當編輯器字型設為 "System Default" 時跳過系統字型載入，使用 egui 預設等寬字型。 / Excluded "System Default" font loading: skip system font loading when editor font is set to "System Default", use egui's default monospace font instead.
+
 ## 2026-01-25
 
 ### 完成 / Completed
